@@ -27,6 +27,7 @@ let autoClaimCooldown = {};
 let autoAbortRequested = false;
 let claimActive = false;
 let lastAutoRound = null;
+let autoToggleBusy = false;
 
 const NOTCH_COLORS = ["var(--notch-1)", "var(--notch-2)", "var(--notch-3)", "var(--notch-4)", "var(--notch-5)", "var(--notch-6)"];
 function notchColor(id) {
@@ -116,7 +117,7 @@ async function awaitClaimPreviewFresh(id) {
     const plans = await invoke("claim_preview", { id });
     claimable[id] = { plans: plans || [], err: null, busy: false };
   } catch (e) {
-    claimable[id] = { plans: [], err: String(e), busy: false };
+    claimable[id] = { plans: claimable[id]?.plans || [], err: String(e), busy: false };
   }
 }
 
@@ -411,11 +412,13 @@ const actions = {
   },
 
   async toggleAutoClaim() {
+    if (autoToggleBusy) return;
     const next = !state.auto_claim;
     if (next && (autoClaimRunning || claimActive || claimAllRunning || refreshClaim.running)) {
       toast(t("m.claimBusy"), "warn");
       return;
     }
+    autoToggleBusy = true;
     try {
       await invoke("set_behavior", { autoClaim: next });
       await refresh();
@@ -427,6 +430,7 @@ const actions = {
         lastAutoRound = null;
       }
     } catch (e) { toast(stripErr(e), "err"); }
+    finally { autoToggleBusy = false; }
   },
 };
 
@@ -519,7 +523,7 @@ async function autoClaimTick() {
     }
   } finally {
     autoClaimRunning = false; claimActive = false;
-    lastAutoRound = { at: Date.now(), claimed: roundClaimed, skipped: roundSkipped };
+    if (state?.auto_claim) lastAutoRound = { at: Date.now(), claimed: roundClaimed, skipped: roundSkipped };
     if (!uiLocked()) render();
   }
 }

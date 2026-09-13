@@ -45,7 +45,7 @@ async function run() {
   try {
     const st = await invoke("get_state");
     if (st?.language) init(st.language);
-  } catch { /* 语言失败不阻塞验证 */ }
+  } catch { }
   document.title = t("c.title");
   $btn.textContent = t("c.btn");
   document.querySelector(".cap-foot").textContent = t("c.foot");
