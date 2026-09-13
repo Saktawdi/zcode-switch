@@ -56,7 +56,22 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Z·SWITCH ${{ github.ref_name }}'
-          releaseBody: '见 [README](https://github.com/${{ github.repository }}/blob/main/README.md) 了解完整功能。Windows：`*_x64-setup.exe` 安装包（推荐）/ `*_portable.exe` 便携版；macOS：`*_aarch64.dmg`（Apple 芯片）/ `*_x64.dmg`（Intel 芯片）；Linux：`*.deb` / `*.AppImage`。各平台均未签名：Windows SmartScreen 选「更多信息 → 仍要运行」，macOS Gatekeeper 右键打开，Linux AppImage 需 chmod +x。'
+          releaseBody: |
+            见 [README](https://github.com/${{ github.repository }}/blob/main/README.md) 了解完整功能。
+
+            ## 下载
+
+            - **Windows**：`*_x64-setup.exe` 安装包（推荐）／`*_portable.exe` 便携版
+            - **macOS**：`*_aarch64.dmg`（Apple 芯片）／`*_x64.dmg`（Intel 芯片）
+            - **Linux**：`*.deb`／`*.AppImage`
+
+            ## 未签名提示
+
+            - Windows：SmartScreen 选「更多信息 → 仍要运行」
+            - macOS：Gatekeeper 右键打开
+            - Linux：AppImage 需 `chmod +x`
+
+            SHA-256 校验和见各 `checksums-*.txt`。
           releaseDraft: false
           prerelease: false
           args: --bundles ${{ matrix.bundles }} ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
