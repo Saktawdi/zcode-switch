@@ -960,7 +960,6 @@ async function sweepTick() {
   const dueAt = quotaDue[due.id];
   try {
     await loadAcctQuota(due.id);
-    await loadClaimPreview(due.id);
     if (quotaDue[due.id] === dueAt) scheduleNext(due.id);
     if (!uiLocked()) render();
   } finally {
