@@ -23,7 +23,7 @@ A Tauri 2 desktop tool for one-click switching between multiple ZCode accounts, 
 - **style-src exemption note**: `dangerousDisableAssetCspModification: ["style-src"]` prevents Tauri from appending style hashes — under the CSP spec a hash makes `'unsafe-inline'` ignored, which would block all `style=""` inline attributes and break rendering
 - **No account loss**: the current login is auto-preserved before switching if not yet saved; file writes go through a temp file + atomic rename
 - **Path traversal protection**: account id whitelist (`[A-Za-z0-9-]`); delete/read cannot escape the account store directory
-- **Encrypted export**: PBKDF2-HMAC-SHA256 (100k iterations) + AES-256-GCM, random salt/nonce; wrong password simply fails, no plaintext traces (unit-test asserted)
+- **Encrypted export**: PBKDF2-HMAC-SHA256 (100k iterations) + AES-256-GCM, random salt/nonce; wrong password simply fails, no plaintext traces
 - **Credentials decrypted locally only**: enc:v1 decryption is used solely to display username/email; export files are password-encrypted
 
 ## CLI
@@ -57,7 +57,6 @@ The embedded login/captcha pages are rendered by the system WebView, which relay
 npm install
 npm run tauri dev      # development (HMR)
 npm run tauri build    # NSIS installer
-cd src-tauri && cargo test   # unit tests (incl. node↔Rust cross-language crypto vectors)
 ```
 
 Windows-first (path detection / process management / tray are all Win32 semantics).

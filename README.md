@@ -23,7 +23,7 @@ Tauri 2 桌面工具：在多个 ZCode 账号之间一键切换，自动显示�
 - **style-src 豁免说明**：`dangerousDisableAssetCspModification: ["style-src"]` 用于阻止 Tauri 追加 style hash——CSP 规范中 hash 与 `'unsafe-inline'` 互斥，注入 hash 会导致所有 `style=""` 内联属性被拦、界面渲染错乱
 - **防丢号**：切换前自动保全未入库登录；文件写入走临时文件 + 原子 rename
 - **路径穿越防护**：账号 id 白名单（`[A-Za-z0-9-]`），删除/读取均不可逃出账号库目录
-- **加密导出**：PBKDF2-HMAC-SHA256（100k 迭代）+ AES-256-GCM，随机 salt/nonce；错密码即失败，无明文痕迹（有单测断言）
+- **加密导出**：PBKDF2-HMAC-SHA256（100k 迭代）+ AES-256-GCM，随机 salt/nonce；错密码即失败，无明文痕迹
 - **凭据只在本地解密**：enc:v1 解密仅用于显示用户名/邮箱；导出文件凭口令加密
 
 ## CLI
@@ -57,7 +57,6 @@ CLI 密码（export / import）：优先环境变量 `ZSW_PASSWORD`（不出现�
 npm install
 npm run tauri dev      # 开发（HMR）
 npm run tauri build    # NSIS 安装包
-cd src-tauri && cargo test   # 单元测试（含 node↔Rust 跨语言加密向量）
 ```
 
 Windows 优先（路径探测 / 进程管理 / 托盘均为 Win32 语义）。
