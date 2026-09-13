@@ -16,6 +16,18 @@ const REFRESH_CLAIM_COOLDOWN_MS = 60_000;
 let refreshClaim = { running: false, done: 0, total: 0, cooldownUntil: 0 };
 let refreshTicker = null;
 
+const AUTO_CLAIM_INTERVAL_MS = 10 * 60 * 1000;
+const AUTO_CLAIM_FIRST_DELAY_MS = 2 * 60 * 1000;
+const AUTO_CLAIM_WAIT_MS = 45_000;
+const AUTO_CLAIM_PER_ACCOUNT_CAP = 5;
+const AUTO_CLAIM_ACCT_GAP_MS = 5_000;
+const AUTO_ABORT_WAIT_MS = 90_000;
+let autoClaimRunning = false;
+let autoClaimCooldown = {};
+let autoAbortRequested = false;
+let claimActive = false;
+let lastAutoRound = null;
+
 const NOTCH_COLORS = ["var(--notch-1)", "var(--notch-2)", "var(--notch-3)", "var(--notch-4)", "var(--notch-5)", "var(--notch-6)"];
 function notchColor(id) {
   let h = 0;
@@ -96,6 +108,32 @@ function waitForClaimResult(accountId, timeoutMs = 90000) {
     const t = setTimeout(() => finish(null), timeoutMs);
     claimWaiter = { accountId, finish };
   });
+}
+
+async function awaitClaimPreviewFresh(id) {
+  claimable[id] = { ...(claimable[id] || {}), busy: true };
+  try {
+    const plans = await invoke("claim_preview", { id });
+    claimable[id] = { plans: plans || [], err: null, busy: false };
+  } catch (e) {
+    claimable[id] = { plans: [], err: String(e), busy: false };
+  }
+}
+
+const accountName = (id) => (state?.accounts || []).find((a) => a.id === id)?.name || id;
+
+function autoPillTitle(s) {
+  const bits = [t("btn.autoClaimTitle")];
+  if (autoClaimRunning) bits.push(t(s.auto_claim ? "m.autoClaimRound" : "m.autoClaimStopping"));
+  if (lastAutoRound) {
+    const d = new Date(lastAutoRound.at);
+    const time = d.toDateString() === new Date().toDateString()
+      ? d.toLocaleTimeString(localeTag(), { hour12: false })
+      : `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${d.toLocaleTimeString(localeTag(), { hour12: false })}`;
+    bits.push(t("m.autoClaimLast", { time, claimed: lastAutoRound.claimed, skipped: lastAutoRound.skipped }));
+    if (lastAutoRound.cooldownAll) bits.push(t("m.autoClaimCooldownAll"));
+  }
+  return esc(bits.join(" · "));
 }
 
 const actions = {
@@ -268,10 +306,11 @@ const actions = {
   },
 
   async claim(id) {
-    if (claimAllRunning || refreshClaim.running) { toast(t("m.claimBusy"), "warn"); return; }
+    if (claimActive || claimAllRunning || refreshClaim.running) { toast(t("m.claimBusy"), "warn"); return; }
     const plans = claimable[id]?.plans || [];
     const plan = plans[0];
     if (!plan) { toast(t("m.noClaimable"), "warn"); return; }
+    claimActive = true;
     try {
       await invoke("claim_start", { id, planId: plan.plan_id });
       toast(t("m.claimVerify", { name: plan.name || plan.plan_id }), "ok", t("m.claimVerifyDetail"));
@@ -279,6 +318,8 @@ const actions = {
       if (!r) toast(t("m.claimTimeout"), "warn");
     } catch (e) {
       toast(stripErr(e), "err");
+    } finally {
+      claimActive = false;
     }
   },
 
@@ -287,8 +328,9 @@ const actions = {
       .map((a) => a.id)
       .filter((id) => (claimable[id]?.plans || []).length > 0);
     if (!ids.length) { toast(t("m.noClaimableAccounts"), "warn"); return; }
-    if (claimAllRunning || refreshClaim.running) return;
+    if (claimActive || claimAllRunning || refreshClaim.running) return;
     claimAllRunning = true;
+    claimActive = true;
     try {
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
@@ -309,6 +351,7 @@ const actions = {
       }
     } finally {
       claimAllRunning = false;
+      claimActive = false;
     }
   },
 
@@ -316,13 +359,27 @@ const actions = {
     const ids = (state?.accounts || []).map((a) => a.id);
     if (!ids.length) return;
     const now = Date.now();
-    if (refreshClaim.running || claimAllRunning) return;
+    if (refreshClaim.running || claimAllRunning || (claimActive && !autoClaimRunning)) return;
     if (now < refreshClaim.cooldownUntil) {
       toast(t("btn.refreshClaimCooldownTitle", { n: Math.ceil((refreshClaim.cooldownUntil - now) / 1000) }), "warn");
       return;
     }
     refreshClaim = { running: true, done: 0, total: ids.length, cooldownUntil: 0 };
     startRefreshTicker();
+    if (autoClaimRunning) {
+      autoAbortRequested = true;
+      const deadline = Date.now() + AUTO_ABORT_WAIT_MS;
+      while (autoClaimRunning && Date.now() < deadline) {
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      if (autoClaimRunning) {
+        refreshClaim.running = false;
+        refreshClaim.cooldownUntil = Date.now() + REFRESH_CLAIM_COOLDOWN_MS;
+        toast(t("m.claimBusy"), "warn");
+        setTimeout(stopRefreshTickerIfIdle, 1100);
+        return;
+      }
+    }
     let okCount = 0;
     try {
       for (let i = 0; i < ids.length; i++) {
@@ -352,6 +409,25 @@ const actions = {
     }
     toast(t("m.refreshClaimDone", { n: ids.length, k: okCount }), "ok");
   },
+
+  async toggleAutoClaim() {
+    const next = !state.auto_claim;
+    if (next && (autoClaimRunning || claimActive || claimAllRunning || refreshClaim.running)) {
+      toast(t("m.claimBusy"), "warn");
+      return;
+    }
+    try {
+      await invoke("set_behavior", { autoClaim: next });
+      await refresh();
+      render();
+      if (state.auto_claim) {
+        toast(t("m.autoClaimOn"), "ok", t("m.autoClaimOnDetail"));
+        if (Date.now() - (lastAutoRound?.at ?? 0) > REFRESH_CLAIM_COOLDOWN_MS) autoClaimTick();
+      } else {
+        lastAutoRound = null;
+      }
+    } catch (e) { toast(stripErr(e), "err"); }
+  },
 };
 
 function startRefreshTicker() {
@@ -365,6 +441,86 @@ function stopRefreshTickerIfIdle() {
   const cooling = Date.now() < refreshClaim.cooldownUntil;
   if (!refreshClaim.running && !cooling && refreshTicker) {
     clearInterval(refreshTicker); refreshTicker = null; if (!uiLocked()) render();
+  }
+}
+
+function autoClaimCooldownFor(r) {
+  const now = Date.now();
+  if (r.code === 1005 && r.nextAt) return r.nextAt;
+  if (Number.isFinite(r.code) && r.code >= 1000) return now + 60 * 60 * 1000;
+  if (r.code === "interactive") return now + 60 * 60 * 1000;
+  return now + AUTO_CLAIM_INTERVAL_MS;
+}
+
+async function autoClaimTick() {
+  if (!state?.auto_claim || autoClaimRunning) return;
+  if (claimActive || claimAllRunning || refreshClaim.running) return;
+  const ids = (state.accounts || [])
+    .map((a) => a.id)
+    .filter((id) => (autoClaimCooldown[id] ?? 0) <= Date.now());
+  if (!ids.length) {
+    if ((state.accounts || []).some((a) => (claimable[a.id]?.plans || []).length > 0)) {
+      lastAutoRound = { at: Date.now(), claimed: 0, skipped: 0, cooldownAll: true };
+    }
+    return;
+  }
+  autoClaimRunning = true; claimActive = true; autoAbortRequested = false;
+  let roundClaimed = 0, roundSkipped = 0;
+  if (!uiLocked()) render();
+  try {
+    for (const id of ids) {
+      if (!state?.auto_claim || autoAbortRequested) break;
+      if (!(state.accounts || []).some((a) => a.id === id)) continue;
+      let gotAny = false;
+      claimable[id] = { ...(claimable[id] || {}), busy: true };
+      try {
+        const r = await invoke("claim_refresh", { id });
+        claimable[id] = { plans: r.plans || [], err: null, busy: false };
+      } catch (e) {
+        claimable[id] = { plans: claimable[id]?.plans || [], err: String(e), busy: false };
+        autoClaimCooldown[id] = Date.now() + AUTO_CLAIM_INTERVAL_MS;
+        roundSkipped++;
+        continue;
+      }
+      if (!uiLocked()) render();
+      let attempts = 0;
+      let progressed = true;
+      while (progressed && attempts < AUTO_CLAIM_PER_ACCOUNT_CAP) {
+        if (autoAbortRequested) break;
+        attempts++;
+        progressed = false;
+        const plan = claimable[id]?.plans?.[0];
+        if (!plan) break;
+        try {
+          await invoke("claim_start", { id, planId: plan.plan_id, auto: true });
+        } catch (e) {
+          await invoke("claim_cancel").catch(() => {});
+          autoClaimCooldown[id] = Date.now() + AUTO_CLAIM_INTERVAL_MS;
+          break;
+        }
+        const r = await waitForClaimResult(id, AUTO_CLAIM_WAIT_MS);
+        if (!r) {
+          await invoke("claim_cancel").catch(() => {});
+          autoClaimCooldown[id] = Date.now() + AUTO_CLAIM_INTERVAL_MS;
+          break;
+        }
+        if (r.ok === false) {
+          autoClaimCooldown[id] = autoClaimCooldownFor(r);
+          break;
+        }
+        gotAny = true; roundClaimed++;
+        await awaitClaimPreviewFresh(id);
+        if (!uiLocked()) render();
+        progressed = true;
+        await new Promise((res) => setTimeout(res, 1200));
+      }
+      if (!gotAny && (claimable[id]?.plans || []).length) roundSkipped++;
+      await new Promise((res) => setTimeout(res, AUTO_CLAIM_ACCT_GAP_MS));
+    }
+  } finally {
+    autoClaimRunning = false; claimActive = false;
+    lastAutoRound = { at: Date.now(), claimed: roundClaimed, skipped: roundSkipped };
+    if (!uiLocked()) render();
   }
 }
 
@@ -477,7 +633,7 @@ function claimStripHtml(id) {
     ${ic("gift", 15)}
     <span class="claim-name">${esc(label)}</span>
     ${grants ? `<span class="claim-grants">${esc(grants)}</span>` : ""}
-    <button class="btn-claim has-ic" click="actions.claim('${id}')" ${claimAllRunning || refreshClaim.running ? "disabled" : ""}>${ic("gift", 13)} ${t("btn.claim")}</button>
+    <button class="btn-claim has-ic" click="actions.claim('${id}')" ${claimAllRunning || refreshClaim.running || claimActive || autoClaimRunning ? "disabled" : ""}>${ic("gift", 13)} ${t("btn.claim")}</button>
   </div>`;
 }
 
@@ -662,7 +818,7 @@ function render() {
         ${ic("capture", 16)} ${t("btn.saveLogin")}
       </button>
       ${claimableCount > 0
-        ? `<button class="btn-ghost has-ic claim-all" click="actions.claimAll()" ${claimAllRunning || refreshClaim.running ? "disabled" : ""}
+        ? `<button class="btn-ghost has-ic claim-all" click="actions.claimAll()" ${claimAllRunning || refreshClaim.running || autoClaimRunning ? "disabled" : ""}
             title="${t("btn.claimAllTitle")}">${ic("gift", 16)} ${t("btn.claimAll")}${claimableCount > 1 ? ` (${claimableCount})` : ""}</button>`
         : ""}
       ${(s.accounts.length > 0)
@@ -676,6 +832,13 @@ function render() {
               : esc(t("btn.refreshClaim"))}
           </button>`
         : ""}
+      <button class="tog-inline${s.auto_claim ? " on" : ""}${autoClaimRunning ? " running" : ""}"
+        role="switch" aria-checked="${s.auto_claim}" aria-label="${t("btn.autoClaim")}"
+        title="${autoPillTitle(s)}"
+        click="actions.toggleAutoClaim()">
+        <span class="toggle${s.auto_claim ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
+        ${t("btn.autoClaim")}
+      </button>
       <button class="btn-ghost has-ic" click="actions.addAccount()" title="${t("btn.addAccountTitle")}">${ic("userPlus", 16)} ${t("btn.addAccount")}</button>
       ${s.zcode_running
         ? `<button class="btn-ghost has-ic" click="actions.askKill()" title="${t("btn.killZcode")}">${ic("power", 16)} ${t("btn.killZcode")}</button>`
@@ -726,9 +889,20 @@ listen("claim://result", (ev) => {
   }
   if (p.accountId) {
     loadAcctQuota(p.accountId);
-    loadClaimPreview(p.accountId).then(() => { if (!uiLocked()) render(); });
+    if (!autoClaimRunning) {
+      loadClaimPreview(p.accountId).then(() => { if (!uiLocked()) render(); });
+    }
     scheduleNext(p.accountId);
   }
+});
+
+listen("captcha://interactive", () => {
+  if (!autoClaimRunning || !claimWaiter) return;
+  const id = claimWaiter.accountId;
+  invoke("claim_cancel").catch(() => {});
+  autoClaimCooldown[id] = Date.now() + 60 * 60 * 1000;
+  toast(t("m.autoClaimInteractive", { name: accountName(id) }), "warn", t("m.autoClaimInteractiveDetail"));
+  claimWaiter.finish({ ok: false, code: "interactive" });
 });
 
 listen("oauth://done", (ev) => {
@@ -803,6 +977,8 @@ async function sweepTick() {
       invoke("get_state").then((s) => { state = s; if (s?.language) init(s.language); enrollAccounts(); if (!uiLocked()) render(); }).catch(() => {});
     }, 5000);
     setInterval(sweepTick, TICK_MS);
+    setTimeout(autoClaimTick, AUTO_CLAIM_FIRST_DELAY_MS);
+    setInterval(autoClaimTick, AUTO_CLAIM_INTERVAL_MS);
   } catch (e) {
     $app.innerHTML = `<div class="loading" style="color:var(--red)">${t("common.loadFail", { e: esc(stripErr(e)) })}</div>`;
     invoke("reveal_main").catch(() => {});

@@ -1,5 +1,6 @@
 
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { init, t, lang, stripErr } from "./i18n.js";
 
 const SDK_URL = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
@@ -22,6 +23,8 @@ function detail(text) {
 document.addEventListener("securitypolicyviolation", (e) => {
   detail(t("c.cspBlocked", { directive: e.violatedDirective, uri: String(e.blockedURI).slice(0, 70) }));
 });
+
+const notifyStuck = () => { emit("captcha://interactive").catch(() => {}); };
 
 function loadSdk() {
   return new Promise((resolve, reject) => {
@@ -52,11 +55,13 @@ async function run() {
   try {
     cfg = await invoke("claim_captcha_config");
   } catch (e) {
+    notifyStuck();
     status(t("c.cfgFail"), "err");
     detail(stripErr(e));
     return;
   }
   if (!cfg.enabled || !cfg.scene_id) {
+    notifyStuck();
     status(t("c.cfgUnavailable"), "err");
     detail(t("c.cfgUnavailableDetail"));
     return;
@@ -65,6 +70,7 @@ async function run() {
   try {
     await loadSdk();
   } catch (e) {
+    notifyStuck();
     status(e.message || t("c.sdkFail"), "err");
     return;
   }
@@ -85,6 +91,7 @@ async function run() {
   };
 
   const interactive = (why) => {
+    notifyStuck();
     clearTimeout(tracelessTimer);
     status(t("c.interactive"));
     $btn.hidden = false;
@@ -113,6 +120,7 @@ async function run() {
       onError: (p) => interactive(p),
     });
   } catch (e) {
+    notifyStuck();
     status(t("c.initFail"), "err");
     detail(String(e));
   }

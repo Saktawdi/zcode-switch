@@ -109,12 +109,15 @@ pub struct Settings {
     pub auth_proxy_url: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub auto_claim: Option<bool>,
 }
 
 impl Settings {
     pub fn launch_after_switch(&self) -> bool { self.launch_after_switch.unwrap_or(true) }
     pub fn close_to_tray(&self) -> bool { self.close_to_tray.unwrap_or(true) }
     pub fn hot_switch(&self) -> bool { self.hot_switch.unwrap_or(false) }
+    pub fn auto_claim(&self) -> bool { self.auto_claim.unwrap_or(false) }
     pub fn auth_proxy(&self) -> Option<&str> {
         if self.auth_proxy_on.unwrap_or(false) {
             self.auth_proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -151,6 +154,7 @@ pub struct AppState {
     pub launch_after_switch: bool,
     pub close_to_tray: bool,
     pub hot_switch: bool,
+    pub auto_claim: bool,
     pub auth_proxy_on: bool,
     pub auth_proxy_url: Option<String>,
     pub language: String,
@@ -1411,6 +1415,7 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         launch_after_switch: settings.launch_after_switch(),
         close_to_tray: settings.close_to_tray(),
         hot_switch: settings.hot_switch(),
+        auto_claim: settings.auto_claim(),
         auth_proxy_on: settings.auth_proxy_on.unwrap_or(false),
         auth_proxy_url: settings.auth_proxy_url.clone(),
         language: crate::i18n::current().as_str().to_string(),
@@ -2213,6 +2218,24 @@ mod tests {
         s.hot_switch = Some(true);
         save_settings(&paths, &s).unwrap();
         assert!(load_settings(&paths).hot_switch());
+    }
+
+    #[test]
+    fn auto_claim_settings_default_and_roundtrip() {
+        let home = fake_home("auto-claim");
+        let paths = Paths::new(&home);
+        assert!(!load_settings(&paths).auto_claim(), "默认关：自动领取必须显式开启");
+        let mut s = load_settings(&paths);
+        s.auto_claim = Some(true);
+        save_settings(&paths, &s).unwrap();
+        assert!(load_settings(&paths).auto_claim());
+        let mut s = load_settings(&paths);
+        s.auto_claim = Some(false);
+        save_settings(&paths, &s).unwrap();
+        assert!(!load_settings(&paths).auto_claim());
+        let raw = r#"{"launch_after_switch":true}"#;
+        let legacy: Settings = serde_json::from_str(raw).unwrap();
+        assert!(!legacy.auto_claim());
     }
 
     #[test]

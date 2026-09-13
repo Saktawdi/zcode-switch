@@ -79,14 +79,19 @@ fn init_flow_at(url: &str, provider: &str, mid: &str) -> Result<FlowInit, String
         .ok_or_else(invalid)?;
     let authorize = data.get("authorize_url").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty())
         .ok_or_else(invalid)?;
+    let poll_token = data
+        .get("poll_token")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or(poll_token);
     let expires_at_ms = data.get("expires_at").and_then(|x| x.as_f64()).map(|s| (s * 1000.0) as u128)
         .ok_or_else(invalid)?;
     let poll_interval_ms = data.get("poll_interval_sec").and_then(|x| x.as_f64()).map(|s| (s * 1000.0) as u64)
         .ok_or_else(invalid)?;
 
-    let mut auth_url: tauri::Url = authorize.parse().map_err(|_| invalid())?;
-    let redirect_key = if provider == "bigmodel" { "redirect" } else { "redirect_uri" };
-    replace_query_param(&mut auth_url, redirect_key, &bridge_redirect_uri());
+    let auth_url: tauri::Url = authorize.parse().map_err(|_| invalid())?;
     let state = auth_url
         .query_pairs()
         .find(|(k, _)| k == "state")
@@ -117,22 +122,6 @@ fn init_flow_at(url: &str, provider: &str, mid: &str) -> Result<FlowInit, String
     })
 }
 
-fn replace_query_param(url: &mut tauri::Url, key: &str, value: &str) {
-    let kept: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .filter(|(k, _)| k != key)
-        .collect();
-    {
-        let mut q = url.query_pairs_mut();
-        q.clear();
-        for (k, v) in kept {
-            q.append_pair(&k, &v);
-        }
-        q.append_pair(key, value);
-    }
-}
-
 #[derive(Debug)]
 pub enum PollOutcome {
     Pending,
@@ -147,7 +136,12 @@ pub fn poll_flow_once(url: &str, poll_token: &str, mid: &str) -> Result<PollOutc
     }
     let resp = match req.call() {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, _)) if (400..500).contains(&code) && code != 408 && code != 429 => {
+        Err(ureq::Error::Status(code, resp)) if (400..500).contains(&code) && code != 408 && code != 429 => {
+            let body = resp.into_string().unwrap_or_default();
+            let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            if v.get("code").and_then(|c| c.as_i64()) == Some(3004) {
+                return Err(crate::i18n::tr("err.oauth.expired"));
+            }
             return Err(crate::i18n::trf("err.oauth.poll_terminal", &[("code", &code.to_string())]));
         }
         Err(_) => return Ok(PollOutcome::Pending),
@@ -1002,12 +996,13 @@ mod tests {
     }
 
     #[test]
-    fn init_flow_rewrites_redirect_to_bridge_and_extracts_state() {
+    fn init_flow_keeps_server_redirect_and_adopts_poll_token() {
         let init_body = json!({
             "code": 0,
             "data": {
                 "flow_id": "fl-abc.123",
-                "authorize_url": "https://bigmodel.cn/login?redirect=zcode%3A%2F%2Foauth%2Fcallback&appId=zcode&state=cafe01",
+                "poll_token": "SRV-POLL-TOKEN-64HEX",
+                "authorize_url": "https://bigmodel.cn/login?redirect=https%3A%2F%2Fzcode.z.ai%2Fapi%2Fv1%2Foauth%2Fcli%2Fcallback%2Fbigmodel&appId=zcode&state=cafe01",
                 "expires_at": (future_ts(600) / 1000) as i64,
                 "poll_interval_sec": 3,
             }
@@ -1016,9 +1011,9 @@ mod tests {
         let f = init_flow_at(&format!("{base}/api/v1/oauth/cli/init"), "bigmodel", "MID").expect("init 成功");
         assert_eq!(f.state, "cafe01");
         assert_eq!(f.poll_url, format!("{base}/api/v1/oauth/cli/poll/fl-abc.123"), "flow_id 须编码拼接");
-        assert!(f.poll_token.len() == 64 && f.poll_token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(f.poll_token, "SRV-POLL-TOKEN-64HEX", "轮询凭证须用服务端下发值");
         assert!(f.authorize_url.starts_with("https://bigmodel.cn/login?"), "{}", f.authorize_url);
-        assert!(f.authorize_url.contains("redirect=https%3A%2F%2Fzcode.z.ai%2Fapp%2Foauth%2Flogin"), "{}", f.authorize_url);
+        assert!(f.authorize_url.contains("redirect=https%3A%2F%2Fzcode.z.ai%2Fapi%2Fv1%2Foauth%2Fcli%2Fcallback%2Fbigmodel"), "{}", f.authorize_url);
         assert!(f.authorize_url.contains("appId=zcode"), "{}", f.authorize_url);
         assert!(f.authorize_url.contains("state=cafe01"), "{}", f.authorize_url);
         assert!(f.expires_at_ms > 0);
@@ -1034,15 +1029,30 @@ mod tests {
             "code": 0,
             "data": {
                 "flow_id": "fl-z",
-                "authorize_url": "https://chat.z.ai/api/oauth/authorize?redirect_uri=zcode%3A%2F%2Foauth%2Fcallback&response_type=code&client_id=c&state=zz11",
+                "poll_token": "SRV-ZAI-TOKEN",
+                "authorize_url": "https://chat.z.ai/api/oauth/authorize?redirect_uri=https%3A%2F%2Fzcode.z.ai%2Fapi%2Fv1%2Foauth%2Fcli%2Fcallback%2Fzai&response_type=code&client_id=c&state=zz11",
                 "expires_at": (future_ts(600) / 1000) as i64,
                 "poll_interval_sec": 2,
             }
         });
         let (base2, _rx2) = mock_server(vec![("POST /api/v1/oauth/cli/init", init_body)]);
         let f2 = init_flow_at(&format!("{base2}/api/v1/oauth/cli/init"), "zai", "MID").unwrap();
-        assert!(f2.authorize_url.contains("redirect_uri=https%3A%2F%2Fzcode.z.ai%2Fapp%2Foauth%2Flogin"), "{}", f2.authorize_url);
+        assert_eq!(f2.poll_token, "SRV-ZAI-TOKEN");
+        assert!(f2.authorize_url.contains("redirect_uri=https%3A%2F%2Fzcode.z.ai%2Fapi%2Fv1%2Foauth%2Fcli%2Fcallback%2Fzai"), "{}", f2.authorize_url);
         assert!(f2.authorize_url.contains("response_type=code"), "{}", f2.authorize_url);
+
+        let legacy = json!({
+            "code": 0,
+            "data": {
+                "flow_id": "fl-old",
+                "authorize_url": "https://bigmodel.cn/login?redirect=r&state=st9",
+                "expires_at": (future_ts(600) / 1000) as i64,
+                "poll_interval_sec": 2,
+            }
+        });
+        let (base3, _rx3) = mock_server(vec![("POST /api/v1/oauth/cli/init", legacy)]);
+        let f3 = init_flow_at(&format!("{base3}/api/v1/oauth/cli/init"), "bigmodel", "MID").unwrap();
+        assert!(f3.poll_token.len() == 64 && f3.poll_token.chars().all(|c| c.is_ascii_hexdigit()), "回落自造 pollToken");
     }
 
     #[test]
@@ -1120,6 +1130,34 @@ mod tests {
         }
         let (b6, _r6) = mock_server(vec![("GET /other", json!({}))]);
         assert!(poll_flow_once(&format!("{b6}/poll"), "T", "M").is_err(), "404 终态");
+    }
+
+    fn raw_server_once(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+        format!("http://{addr}/poll")
+    }
+
+    #[test]
+    fn poll_4xx_body_codes_are_translated() {
+        let url = raw_server_once("HTTP/1.1 400 Bad Request", "{\"code\":3004,\"msg\":\"invalid_flow\"}");
+        let e = poll_flow_once(&url, "T", "M").unwrap_err();
+        assert_eq!(e, crate::i18n::tr("err.oauth.expired"), "3004 须映射为过期文案：{e}");
+        let url2 = raw_server_once("HTTP/1.1 403 Forbidden", "{\"code\":3001,\"msg\":\"denied\"}");
+        let e2 = poll_flow_once(&url2, "T", "M").unwrap_err();
+        assert_eq!(e2, crate::i18n::trf("err.oauth.poll_terminal", &[("code", "403")]), "{e2}");
     }
 
     #[test]
