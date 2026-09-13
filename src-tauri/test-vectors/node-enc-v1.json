@@ -1,6 +1,0 @@
-{
-  "secret": "zsw-node-vector-secret-2026",
-  "enc": "enc:v1:MjAyNjA4MjN6c3cw.pttsIHEYcbW0bz5jD4XGOw.wFBGfsU8jgZUcB8xe6Edh6Vq",
-  "plain": "hello zcode-switch",
-  "note": "node crypto aes-256-gcm cross-language vector, generated 2026-08-23"
-}

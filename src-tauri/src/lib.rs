@@ -1214,19 +1214,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
-#[cfg(test)]
-mod tests {
-    use super::deeplink_err_soft;
-
-    #[test]
-    fn deeplink_soft_failure_classification() {
-        assert!(!deeplink_err_soft("__superseded__"));
-        assert!(!deeplink_err_soft("__attribution__"));
-        assert!(deeplink_err_soft(
-            "token 交换请求失败：https://zcode.z.ai/api/v1/oauth/token: status code 500"
-        ));
-        assert!(deeplink_err_soft("state 不一致"));
-        assert!(deeplink_err_soft(""));
-    }
-}

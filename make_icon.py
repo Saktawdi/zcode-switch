@@ -111,7 +111,7 @@ put_poly([
     (ax + nx, ay + ny), (bx + nx, by + ny),
     (bx - nx, by - ny), (ax - nx, ay - ny)], diag_color)
 
-out_n = N
+out_n = N // SS
 rows = []
 for y4 in range(out_n):
     row = bytearray([0])
@@ -122,7 +122,7 @@ for y4 in range(out_n):
                 c = pixels[y4 * SS + dyy][x4 * SS + dxx]
                 if c is not None:
                     r += c[0]; g += c[1]; b += c[2]; cnt += 1
-        row += bytes([r
+        row += bytes([r // cnt, g // cnt, b // cnt, 255]) if cnt else bytes([0, 0, 0, 0])
     rows.append(bytes(row))
 
 def chunk(tag, data):
