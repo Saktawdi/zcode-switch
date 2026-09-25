@@ -118,10 +118,11 @@ pub fn push_ticket(verify_param: &str, region: Option<String>) -> Result<usize, 
         return Err(RejectReason::TooShort);
     }
     if let Some((certify, sec)) = decode_param_certify(&param) {
-        if let Some(sec) = sec {
-            if sec.len() < 50 {
-                return Err(RejectReason::Degraded);
-            }
+        // zcode-api 同款严格门：securityToken 缺失或 <50 都是 degraded
+        // result（"Len-76 junk ... no securityToken ... WILL 3007"）
+        match sec {
+            Some(sec) if sec.len() >= 50 => {}
+            _ => return Err(RejectReason::Degraded),
         }
         if let Some(id) = certify {
             let mut used = USED_CERTIFY_IDS.lock().unwrap_or_else(|e| e.into_inner());
@@ -245,8 +246,13 @@ mod tests {
         assert!(!is_challenge(400, &empty, "normal error"));
     }
 
+    /// POOL/USED_CERTIFY_IDS 是进程级全局，池相关测试必须串行。
+    static POOL_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     #[test]
     fn pool_fifo_capacity_and_single_use() {
+        let _g = POOL_TEST_LOCK.lock().unwrap();
         {
             let mut p = pool_cell();
             p.clear();
@@ -274,6 +280,7 @@ mod tests {
     /// zcode-api 质量门：废票（过短/缺 securityToken/重复 certifyId）不得入池。
     #[test]
     fn quality_gates() {
+        let _g = POOL_TEST_LOCK.lock().unwrap();
         {
             let mut p = pool_cell();
             p.clear();
@@ -290,11 +297,17 @@ mod tests {
             "pad": "p".repeat(260),
         }));
         assert_eq!(push_ticket(&degraded, None), Err(RejectReason::Degraded));
-        // 正常票
-        let good1 = enc(&serde_json::json!({ "certifyId": "c2", "securityToken": "s".repeat(60) }));
+        // 正常票（真实 param ~280 chars：certifyId+sceneId+isSign+securityToken）
+        let good1 = enc(&serde_json::json!({
+            "certifyId": "c2", "sceneId": "11xygtvd", "isSign": true,
+            "securityToken": "s".repeat(60), "pad": "p".repeat(260),
+        }));
         assert!(push_ticket(&good1, None).is_ok());
         // 同 certifyId 再入 → F008 拒绝
-        let dup = enc(&serde_json::json!({ "certifyId": "c2", "securityToken": "t".repeat(60) }));
+        let dup = enc(&serde_json::json!({
+            "certifyId": "c2", "sceneId": "11xygtvd", "isSign": true,
+            "securityToken": "t".repeat(60), "pad": "q".repeat(260),
+        }));
         assert_eq!(push_ticket(&dup, None), Err(RejectReason::DuplicateCertify));
         while take_ticket().is_some() {}
     }
