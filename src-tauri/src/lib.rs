@@ -803,12 +803,17 @@ fn captcha_event_ping() {
     *LAST_CAPTCHA_EVENT.lock().unwrap_or_else(|e| e.into_inner()) = now;
 }
 
+fn captcha_event_reset() {
+    captcha_event_ping();
+}
+
 fn last_captcha_event() -> i64 {
     *LAST_CAPTCHA_EVENT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 看门狗：池未满且 captcha 链路静默超 45s → 强制 reload 预解窗重开一轮。
-/// JS 侧的兜底定时器在窗口被节流时不可靠，卡死检测必须留在 Rust 侧。
+/// 看门狗：池未满且 captcha 链路静默超 45s → 销毁并重建预解窗（全新
+/// renderer，JS 必然执行）。v1.15 的 eval(reload) 实测无效——被后台化
+/// 冻结的 renderer 连导航都不处理，只有换进程才可靠。
 async fn captcha_watchdog(app: AppHandle) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -823,23 +828,27 @@ async fn captcha_watchdog(app: AppHandle) {
         if silent_ms < 45_000 {
             continue;
         }
-        if let Some(w) = app.get_webview_window("captcha-warmup") {
-            let _ = w.eval("location.reload()");
-            gateway::logs::push(gateway::logs::GatewayLogEntry {
-                ts: chrono::Utc::now().timestamp_millis(),
-                route: "captcha".into(),
-                format: "captcha".into(),
-                model: "watchdog-reload".into(),
-                account: None,
-                provider: None,
-                plan: None,
-                status: 0,
-                ms: silent_ms as u64,
-                attempts: 1,
-                error: Some(format!("pool {size}/{} stale {silent_ms}ms — reloaded warmup", gateway::captcha::POOL_MAX)),
-            });
-            captcha_event_ping();
+        let stale_s = silent_ms / 1000;
+        // 销毁重建：close 是异步的，先移除再重建；窗口不存在时直接建
+        if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
+            let _ = w.close();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
+        let rebuilt = gateway_captcha_warmup_start(app.clone()).await.is_ok();
+        gateway::logs::push(gateway::logs::GatewayLogEntry {
+            ts: chrono::Utc::now().timestamp_millis(),
+            route: "captcha".into(),
+            format: "captcha".into(),
+            model: "watchdog-rebuild".into(),
+            account: None,
+            provider: None,
+            plan: None,
+            status: if rebuilt { 1 } else { 0 },
+            ms: silent_ms as u64,
+            attempts: 1,
+            error: Some(format!("pool {size}/{} stale {}s — rebuilt warmup window", size, stale_s)),
+        });
+        captcha_event_ping();
     }
 }
 
@@ -1257,6 +1266,7 @@ async fn gateway_set_config(
     gateway::apply(cfg).await?;
     // 预解窗口随网关联动：开启→常驻后台补充票据池；关闭→回收
     if gateway::is_running() {
+        captcha_event_reset();
         let _ = gateway_captcha_warmup_start(app.clone()).await;
         let wd = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -1365,12 +1375,22 @@ async fn gateway_captcha_warmup_start(app: AppHandle) -> Result<bool, String> {
         let _ = w.show();
         return Ok(true);
     }
+    // WebView2 的 AdditionalBrowserArguments 只在 environment 创建时生效
+    // 一次（按 data dir 单例）——共享主窗 data dir 时这些开关会被静默忽略。
+    // 独立 profile 才能让禁节流开关真正生效。
+    let profile_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("gateway-warmup-profile");
+    let _ = std::fs::create_dir_all(&profile_dir);
     let win = tauri::WebviewWindowBuilder::new(
         &app,
         WARMUP_LABEL,
         tauri::WebviewUrl::App("captcha.html".into()),
     )
     .title("Z·GATEWAY warmup")
+    .data_directory(profile_dir)
     .theme(Some(tauri::Theme::Dark))
     .background_color(tauri::window::Color(10, 10, 12, 255))
     .inner_size(170.0, 46.0)
@@ -1533,6 +1553,7 @@ pub fn run() {
                 if cfg.enabled {
                     match gateway::start(cfg).await {
                         Ok(()) => {
+                            captcha_event_reset();
                             let _ = gateway_captcha_warmup_start(setup_handle.clone()).await;
                             let wd = setup_handle.clone();
                             tauri::async_runtime::spawn(async move {

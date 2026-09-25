@@ -61,7 +61,7 @@ function rowsHtml() {
         <span class="gwlog-model">${detail}</span>
         <span class="gwlog-acct" title="${l.account || ""}">${l.account || "—"}</span>
         <span class="gwlog-plan">${l.provider || ""}${l.plan ? ` · ${l.plan}` : ""}</span>
-        <span class="gwlog-ms">${l.ms ? l.ms + "ms" : ""}${l.attempts > 1 ? ` · ×${l.attempts}` : ""}</span>
+        <span class="gwlog-ms">${l.ms ? (l.ms > 10000 ? Math.round(l.ms / 1000) + "s" : l.ms + "ms") : ""}${l.attempts > 1 ? ` · ×${l.attempts}` : ""}</span>
       </div>
       ${err}
       ${isEvent && l.error ? "" : ""}
