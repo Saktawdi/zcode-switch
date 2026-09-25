@@ -1280,10 +1280,13 @@ async fn gateway_captcha_pool_status() -> Result<serde_json::Value, String> {
 
 const WARMUP_LABEL: &str = "captcha-warmup";
 
-/// 启动隐藏预解窗口（网关开启时常驻，后台补充票据池）。
+/// 启动预解窗口：**可见的微型窗**（无装饰、150×44、贴右下角、不占任务栏）。
+/// WebView2 隐藏窗口会暂停渲染与 rAF，阿里云无痕验证拿不到环境信号会永久
+/// 卡死——这是 v1.10/v1.11 池始终为空的根因；可见窗口才能正常求解。
 #[tauri::command]
 async fn gateway_captcha_warmup_start(app: AppHandle) -> Result<bool, String> {
-    if app.get_webview_window(WARMUP_LABEL).is_some() {
+    if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
+        let _ = w.show();
         return Ok(true);
     }
     let win = tauri::WebviewWindowBuilder::new(
@@ -1293,14 +1296,28 @@ async fn gateway_captcha_warmup_start(app: AppHandle) -> Result<bool, String> {
     )
     .title("Z·GATEWAY warmup")
     .theme(Some(tauri::Theme::Dark))
-    .inner_size(380.0, 320.0)
-    .visible(false)
+    .background_color(tauri::window::Color(10, 10, 12, 255))
+    .inner_size(170.0, 46.0)
+    .decorations(false)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
     .skip_taskbar(true)
     .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server")
     .build()
     .map_err(|e| e.to_string())?;
-    let _ = win.hide();
+    park_warmup_window(&win);
     Ok(true)
+}
+
+/// 把预解窗贴到主屏右下角。
+fn park_warmup_window(win: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = win.current_monitor() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let m = monitor.size();
+    let x = m.width.saturating_sub(size.width).saturating_sub(18);
+    let y = m.height.saturating_sub(size.height).saturating_sub(48);
+    let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
 }
 
 /// 关闭预解窗口（网关停止时调用）。
@@ -1312,20 +1329,28 @@ async fn gateway_captcha_warmup_stop(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 预解窗口可见性：traceless 需要人工时显示，完成后隐藏。
-/// 窗口不存在（被手动关闭）时自动重建，救援路径永远可达。
+/// 预解窗口形态切换：rescue=false 保持微型预解形态（贴角落）；
+/// rescue=true 人工救援 → 放大为标准验证窗、带装饰、前台聚焦。
 #[tauri::command]
-async fn gateway_captcha_warmup_visibility(app: AppHandle, visible: bool) -> Result<(), String> {
+async fn gateway_captcha_warmup_visibility(app: AppHandle, rescue: bool) -> Result<(), String> {
     if app.get_webview_window(WARMUP_LABEL).is_none() {
         gateway_captcha_warmup_start(app.clone()).await?;
     }
     if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
-        if visible {
+        if rescue {
+            let _ = w.set_decorations(true);
+            let _ = w.set_size(tauri::LogicalSize::new(380.0, 320.0));
+            let _ = w.center();
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
         } else {
-            let _ = w.hide();
+            // 恢复微型预解形态——注意只变形不隐藏：隐藏窗口 rAF 暂停会让
+            // 下一轮无痕验证重新卡死（v1.11 池为空的根因）
+            let _ = w.set_decorations(false);
+            let _ = w.set_resizable(false);
+            let _ = w.set_size(tauri::LogicalSize::new(170.0, 46.0));
+            park_warmup_window(&w);
         }
     }
     Ok(())

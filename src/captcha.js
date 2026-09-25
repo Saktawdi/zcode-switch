@@ -63,6 +63,7 @@ async function runWarmup() {
   try {
     mode = "gateway-warmup";
     document.title = "Z·GATEWAY · warmup";
+    document.body.classList.add("warmup-mini");
     status(t("c.traceless"));
     const st = await invoke("gateway_captcha_pool_status").catch(() => null);
     if (st && st.size >= (st.max ?? 12)) {
@@ -84,18 +85,27 @@ async function runWarmup() {
       getInstance: (instance) => {
         if (typeof instance.startTracelessVerification === "function") {
           instance.startTracelessVerification();
-          // traceless 迟迟不回来 → 显形请人工，避免静默卡死
+          // traceless 迟迟不回来 → 放大窗口请人工，避免静默卡死
           tracelessTimer = setTimeout(() => {
-            invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+            document.body.classList.remove("warmup-mini");
+            invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
+            status(t("c.interactive"));
+            $btn.hidden = false;
             tracelessTimer = setTimeout(warmupNextRound, 60000);
           }, 6000);
         } else {
-          invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+          document.body.classList.remove("warmup-mini");
+          invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
+          status(t("c.interactive"));
+          $btn.hidden = false;
         }
       },
       success: (param) => submit(typeof param === "string" ? param : param?.captchaVerifyParam),
       fail: () => {
-        invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+        document.body.classList.remove("warmup-mini");
+        invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
+        status(t("c.interactive"));
+        $btn.hidden = false;
         tracelessTimer = setTimeout(warmupNextRound, 60000);
       },
       onError: () => {
@@ -158,9 +168,9 @@ async function run() {
     submitted = true;
     clearTimeout(tracelessTimer);
     if (mode === "gateway-warmup") {
-      // 预解循环：入池 → 隐藏窗口（若曾因人工验证显形）→ 按池容量决定下一轮
+      // 预解循环：入池 → 恢复微型预解形态 → 按池容量决定下一轮
       invoke("gateway_captcha_submit", { param, region })
-        .then(() => invoke("gateway_captcha_warmup_visibility", { visible: false }).catch(() => {}))
+        .then(() => invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {}))
         .catch(() => {})
         .finally(() => setTimeout(warmupNextRound, 400));
       return;
