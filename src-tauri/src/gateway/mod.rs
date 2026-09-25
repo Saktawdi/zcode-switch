@@ -151,12 +151,13 @@ pub async fn start(config: GatewayConfig) -> Result<(), String> {
             .await;
     });
 
-    // coding-plan key 自愈循环（随网关生命周期）
+    // coding-plan key 自愈循环（随网关生命周期；消费 401 触发的 reauth 请求）
     {
         let home = paths.home.clone();
+        let pool_for_repair = ctx.pool.clone();
         let repair_rx = shutdown_tx.subscribe();
         tauri::async_runtime::spawn(async move {
-            repair::run_loop(home, repair_rx).await;
+            repair::run_loop(pool_for_repair, home, repair_rx).await;
         });
     }
 

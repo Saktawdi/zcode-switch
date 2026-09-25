@@ -109,6 +109,8 @@ pub struct AccountPool {
     /// permits). Config changes restart the gateway, rebuilding the pool and
     /// its semaphores.
     semaphores: tokio::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// 401 过的账号请求重解析 coding key（key 过期自愈）。
+    reauth: tokio::sync::Mutex<Vec<String>>,
     rr: AtomicUsize,
 }
 
@@ -119,8 +121,21 @@ impl AccountPool {
             cache: tokio::sync::RwLock::new(None),
             health: tokio::sync::Mutex::new(HashMap::new()),
             semaphores: tokio::sync::Mutex::new(HashMap::new()),
+            reauth: tokio::sync::Mutex::new(Vec::new()),
             rr: AtomicUsize::new(0),
         }
+    }
+
+    /// 401 后标记账号需要重解析 coding key（self-heal 循环消费）。
+    pub async fn request_reauth(&self, account_id: &str) {
+        let mut q = self.reauth.lock().await;
+        if !q.contains(&account_id.to_string()) {
+            q.push(account_id.to_string());
+        }
+    }
+
+    pub async fn take_reauth_requests(&self) -> Vec<String> {
+        std::mem::take(&mut *self.reauth.lock().await)
     }
 
     /// Get (or lazily create) the concurrency semaphore for one account.

@@ -556,6 +556,10 @@ fn last_error_tuple(entry: &PoolEntry, status: u16, body: &str) -> (u16, String,
 
 async fn record_status_failure(ctx: &GatewayContext, entry: &PoolEntry, status: u16, body: &str) {
     if let Some(kind) = failure_kind_for_status(status) {
+        if kind == FailureKind::Unauthorized && entry.plan == "coding-plan" {
+            // coding key 失效（如「令牌已过期或验证不正确」）→ 请求 self-heal 重解析
+            ctx.pool.request_reauth(&entry.account_id).await;
+        }
         ctx.pool
             .report_failure(&entry.account_id, kind, format!("HTTP {status}: {}", body.chars().take(120).collect::<String>()))
             .await;

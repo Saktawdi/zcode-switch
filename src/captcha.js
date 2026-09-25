@@ -51,6 +51,19 @@ function gwlog(stage, detail) {
   return invoke("gateway_captcha_event", { stage, detail: detail ?? null }).catch(() => {});
 }
 
+/// 清掉 SDK 的本地会话（localStorage/sessionStorage/IndexedDB）。
+/// location.reload() 不会清这些——SDK 恢复旧会话会复用 certifyId，
+/// 阿里云判 F008（duplicate certify），池永远拿不到票。zcode-api 的
+/// 等价做法是失败后销毁整个 solver window。
+async function wipeSdkState() {
+  try { localStorage.clear(); } catch { }
+  try { sessionStorage.clear(); } catch { }
+  try {
+    const dbs = (indexedDB.databases ? await indexedDB.databases() : []) || [];
+    for (const d of dbs) { try { indexedDB.deleteDatabase(d.name); } catch { } }
+  } catch { }
+}
+
 /// 预解循环的单轮调度：池满等久一点，缺票（或 urgent）立即再来一张。
 async function warmupNextRound() {
   let st = null;
@@ -81,6 +94,7 @@ async function runWarmup() {
     mode = "gateway-warmup";
     document.title = "Z·GATEWAY · warmup";
     document.body.classList.add("warmup-mini");
+    wipeSdkState(); // 每轮全新 SDK 会话——certifyId 复用是 F008 的直接来源
     await invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
     const st = await invoke("gateway_captcha_pool_status").catch(() => null);
     if (st && st.size >= (st.max ?? 12)) {
@@ -138,14 +152,35 @@ async function runWarmup() {
           armRescueGuard(45000);
         }
       },
-      success: (param) => {
+      success: (result) => {
         disarmRescueGuard();
-        submitted = false; // 每轮独立：守卫 reload 后旧行为不残留
-        submit(typeof param === "string" ? param : param?.captchaVerifyParam);
+        clearTimeout(tracelessTimer);
+        // result 可能是对象：{success, verifyResult, verifyCode, certifyId, captchaVerifyParam?}
+        // verifyResult=false = 风控拒（F008=certifyId 复用等）——清会话重来，绝不静默
+        if (result && typeof result === "object" && result.verifyResult === false) {
+          gwlog("verify-rejected", `code=${result.verifyCode} certify=${result.certifyId || "-"} — wiping session`);
+          wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
+          return;
+        }
+        const param = typeof result === "string"
+          ? result
+          : result?.captchaVerifyParam || result?.verifyParam || result?.data || result?.param;
+        submitted = false;
+        submit(typeof param === "string" ? param : param ? String(param) : "");
+        if (!submitted) {
+          gwlog("empty-param", JSON.stringify(result).slice(0, 120));
+          wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
+        }
       },
       fail: (p) => {
-        // 拖拽失败：SDK 界面可重试，不 reload 打断用户；只埋点+延长守卫
-        gwlog("sdk-fail", typeof p === "string" ? p.slice(0, 120) : JSON.stringify(p).slice(0, 120));
+        // 拖拽失败 / 无痕被拒：SDK 界面可重试，不 reload 打断用户；埋点+延长守卫
+        const raw = typeof p === "string" ? p : JSON.stringify(p || {});
+        if (p && typeof p === "object" && p.verifyResult === false) {
+          gwlog("verify-rejected-fail", `code=${p.verifyCode} certify=${p.certifyId || "-"}`);
+          wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
+          return;
+        }
+        gwlog("sdk-fail", raw.slice(0, 120));
         armRescueGuard(60000);
       },
       onError: (p) => {
@@ -210,10 +245,19 @@ async function run() {
     submitted = true;
     clearTimeout(tracelessTimer);
     if (mode === "gateway-warmup") {
-      // 预解循环：入池 → 恢复微型预解形态 → 下一轮
+      // 预解循环：质量校验（len<200 是必 3007 的废票，zcode-api 同款防线）
+      // → 入池 → 恢复微型预解形态 → 下一轮
+      if (submitted) return;
+      submitted = true;
+      disarmRescueGuard();
+      if (!param || param.length < 200) {
+        gwlog("degraded-param", `len=${param ? param.length : 0} — refusing, reloading`);
+        wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
+        return;
+      }
       gwlog("success", `verifyParam len=${param.length}`);
       invoke("gateway_captcha_submit", { param, region })
-        .then((r) => gwlog("pool-push", `accepted=${!!r?.accepted} size=${r?.size ?? "?"}`))
+        .then((r) => gwlog("pool-push", `accepted=${!!r?.accepted} size=${r?.size ?? "?"} ${r?.reason || ""}`))
         .catch((e) => gwlog("pool-push-fail", String(e)))
         .finally(() => {
           invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});

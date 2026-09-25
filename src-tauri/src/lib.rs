@@ -1282,9 +1282,12 @@ async fn open_gateway_logs(app: AppHandle) -> Result<(), String> {
 /// 池满则拒绝（warmup 循环据此退避，避免过度解票）。
 #[tauri::command]
 async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<String>) -> Result<serde_json::Value, String> {
-    let accepted = gateway::captcha::push_ticket(&param, region);
+    let (accepted, reason) = match gateway::captcha::push_ticket(&param, region) {
+        Ok(size) => (true, None),
+        Err(r) => (false, Some(r.as_str().to_string())),
+    };
     close_captcha_window(&app);
-    Ok(json!({ "accepted": accepted, "size": gateway::captcha::pool_len() }))
+    Ok(json!({ "accepted": accepted, "size": gateway::captcha::pool_len(), "reason": reason }))
 }
 
 /// 预解池状态：warmup 循环的节流依据（zcode-api 池的 min/max 语义）。

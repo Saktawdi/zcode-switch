@@ -41,6 +41,10 @@ impl Ticket {
 }
 
 static POOL: Mutex<VecDeque<Ticket>> = Mutex::new(VecDeque::new());
+/// zcode-api 同款防线：已消耗/已入池的 certifyId 集合，阻断 F008
+/// （duplicate certify）——同一个 certify 解出的票绝不允许入池两次。
+static USED_CERTIFY_IDS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 /// Set when a live request actually hit a challenge — the warmup loop polls
 /// this to top the pool up immediately (zcode-api `urgentCaptchaRefill`).
 static URGENT: AtomicBool = AtomicBool::new(false);
@@ -55,17 +59,85 @@ fn clear_expired(guard: &mut VecDeque<Ticket>) {
     guard.retain(|t| t.fresh());
 }
 
-/// Mint a ticket into the pool. Returns false when the pool is already full
-/// (the warmup loop uses this as its backpressure signal).
-pub fn push_ticket(verify_param: &str, region: Option<String>) -> bool {
+/// 入池拒绝原因（前端 gwlog 与日志页直接可读）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    Empty,
+    TooShort,
+    Degraded,
+    DuplicateCertify,
+    Full,
+}
+
+impl RejectReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RejectReason::Empty => "empty",
+            RejectReason::TooShort => "too-short (<200, degraded result)",
+            RejectReason::Degraded => "missing securityToken (degraded result)",
+            RejectReason::DuplicateCertify => "duplicate certifyId (F008)",
+            RejectReason::Full => "pool full",
+        }
+    }
+}
+
+/// 真 param 的形状（zcode-api extractVerifyParam 实测）：base64(JSON)，
+/// JSON 含 certifyId + sceneId + isSign + 长 securityToken。
+fn decode_param_certify(param: &str) -> Option<(Option<String>, Option<String>)> {
+    use base64::Engine;
+    let trimmed = param.trim();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| {
+            let nopad = trimmed.trim_end_matches('=');
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(nopad)
+        })
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let certify = v.get("certifyId").and_then(|x| x.as_str()).map(str::to_string);
+    let sec = v
+        .get("securityToken")
+        .or_else(|| v.get("SecurityToken"))
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    Some((certify, sec))
+}
+
+/// Mint a ticket into the pool with zcode-api quality gates:
+///   - len < 200 → degraded result (would 3007 upstream), refuse;
+///   - decodable param must carry a real securityToken (≥50 chars);
+///   - certifyId must never enter the pool twice (F008).
+/// Returns pool size on success.
+pub fn push_ticket(verify_param: &str, region: Option<String>) -> Result<usize, RejectReason> {
     let param = verify_param.trim().to_string();
     if param.is_empty() {
-        return false;
+        return Err(RejectReason::Empty);
     }
+    if param.len() < 200 {
+        return Err(RejectReason::TooShort);
+    }
+    if let Some((certify, sec)) = decode_param_certify(&param) {
+        if let Some(sec) = sec {
+            if sec.len() < 50 {
+                return Err(RejectReason::Degraded);
+            }
+        }
+        if let Some(id) = certify {
+            let mut used = USED_CERTIFY_IDS.lock().unwrap_or_else(|e| e.into_inner());
+            if used.len() > 512 {
+                used.clear(); // 防无限增长；复用窗口远小于此
+            }
+            if !used.insert(id) {
+                return Err(RejectReason::DuplicateCertify);
+            }
+        }
+    }
+    // 解码失败（格式漂移）时宽容放行，交由上游 3007 兜底
     let mut pool = pool_cell();
     clear_expired(&mut pool);
     if pool.len() >= POOL_MAX {
-        return false;
+        return Err(RejectReason::Full);
     }
     pool.push_back(Ticket {
         verify_param: param,
@@ -73,7 +145,7 @@ pub fn push_ticket(verify_param: &str, region: Option<String>) -> bool {
         created_at: Instant::now(),
     });
     URGENT.store(false, Ordering::SeqCst);
-    true
+    Ok(pool.len())
 }
 
 /// Take a fresh ticket (hot path, single-use).
@@ -178,24 +250,53 @@ mod tests {
         {
             let mut p = pool_cell();
             p.clear();
+            USED_CERTIFY_IDS.lock().unwrap().clear();
         }
         assert_eq!(pool_len(), 0);
-        assert!(push_ticket("a", Some("cn".into())));
-        assert!(push_ticket("b", None));
+        assert!(push_ticket(&format!("{}{}", "x".repeat(200), "a"), Some("cn".into())).is_ok());
+        assert!(push_ticket(&format!("{}{}", "x".repeat(200), "b"), None).is_ok());
         assert_eq!(pool_len(), 2);
         let t = take_ticket().unwrap();
-        assert_eq!(t.verify_param, "a", "FIFO order");
+        assert!(t.verify_param.ends_with('a'), "FIFO order");
         assert_eq!(pool_len(), 1);
 
         for i in 0..POOL_MAX {
-            push_ticket(&format!("fill{i}"), None);
+            push_ticket(&format!("{}fill{i}", "y".repeat(200)), None).ok();
         }
         assert_eq!(pool_len(), POOL_MAX);
-        assert!(!push_ticket("overflow", None), "full pool rejects");
+        assert_eq!(push_ticket(&format!("{}overflow", "y".repeat(200)), None), Err(RejectReason::Full));
 
         while take_ticket().is_some() {}
         assert!(take_ticket().is_none());
-        assert!(!push_ticket("   ", None));
+        assert_eq!(push_ticket("   ", None), Err(RejectReason::Empty));
+    }
+
+    /// zcode-api 质量门：废票（过短/缺 securityToken/重复 certifyId）不得入池。
+    #[test]
+    fn quality_gates() {
+        {
+            let mut p = pool_cell();
+            p.clear();
+            USED_CERTIFY_IDS.lock().unwrap().clear();
+        }
+        use base64::Engine;
+        let enc = |v: &serde_json::Value| base64::engine::general_purpose::STANDARD.encode(v.to_string());
+
+        // 过短
+        assert_eq!(push_ticket("short", None), Err(RejectReason::TooShort));
+        // 缺 securityToken（degraded）——补足长度以穿过 TooShort 门
+        let degraded = enc(&serde_json::json!({
+            "certifyId": "c1", "isSign": true, "sceneId": "11xygtvd",
+            "pad": "p".repeat(260),
+        }));
+        assert_eq!(push_ticket(&degraded, None), Err(RejectReason::Degraded));
+        // 正常票
+        let good1 = enc(&serde_json::json!({ "certifyId": "c2", "securityToken": "s".repeat(60) }));
+        assert!(push_ticket(&good1, None).is_ok());
+        // 同 certifyId 再入 → F008 拒绝
+        let dup = enc(&serde_json::json!({ "certifyId": "c2", "securityToken": "t".repeat(60) }));
+        assert_eq!(push_ticket(&dup, None), Err(RejectReason::DuplicateCertify));
+        while take_ticket().is_some() {}
     }
 
     #[test]

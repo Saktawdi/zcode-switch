@@ -51,7 +51,7 @@ function rowsHtml() {
         ? `<span class="gwlog-st repair">CAPTCHA</span>`
         : `<span class="gwlog-st ${statusClass(l.status)}">${l.status}</span>`;
     const err = l.error ? `<div class="gwlog-err" title="${l.error.replace(/"/g, "&quot;")}">${l.error}</div>` : "";
-    const detail = isEvent && l.error ? "" : l.model;
+    const detail = l.model; // 事件行始终显示 stage（error 走红字详情，不挤占 stage）
     return `
     <div class="gwlog-row">
       <div class="gwlog-main">

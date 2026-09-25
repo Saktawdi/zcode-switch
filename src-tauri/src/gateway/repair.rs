@@ -6,6 +6,7 @@
 //! the stored account.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -42,8 +43,10 @@ fn anthropic_base_for(provider: &str) -> &'static str {
 
 /// One repair pass over the whole account store. Network-heavy (biz API) and
 /// therefore run outside any locks; the final read-modify-save re-checks the
-/// account under the store lock. Returns the number of repaired accounts.
-pub fn repair_pass(home: &std::path::Path) -> usize {
+/// account under the store lock. `force` lists account ids whose existing
+/// coding key just 401'd — they get re-resolved even though a key is present.
+/// Returns the number of repaired accounts.
+pub fn repair_pass(home: &std::path::Path, force: &std::collections::HashSet<String>) -> usize {
     let paths = Paths { home: home.to_path_buf() };
     let Ok(accounts) = store::list_accounts(&paths) else {
         return 0;
@@ -58,8 +61,8 @@ pub fn repair_pass(home: &std::path::Path) -> usize {
             "zai" | "bigmodel" => provider,
             _ => continue,
         };
-        if coding_key_present(acc.config.as_ref(), &provider) {
-            continue; // already has a coding-plan key
+        if coding_key_present(acc.config.as_ref(), &provider) && !force.contains(&acc.id) {
+            continue; // already has a coding-plan key (and hasn't 401'd)
         }
         let access_key = format!("oauth:{provider}:access_token");
         let Some(access) = decrypt_field(&acc.credentials, &access_key, &secret)
@@ -127,6 +130,7 @@ pub fn repair_pass(home: &std::path::Path) -> usize {
 /// 90 s while the gateway is running (the task dies with the gateway via
 /// the shutdown watch).
 pub async fn run_loop(
+    pool: Arc<crate::gateway::pool::AccountPool>,
     home: std::path::PathBuf,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -137,7 +141,9 @@ pub async fn run_loop(
         }
         if !REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
             let h = home.clone();
-            let _ = tokio::task::spawn_blocking(move || repair_pass(&h)).await;
+            let force: std::collections::HashSet<String> =
+                pool.take_reauth_requests().await.into_iter().collect();
+            let _ = tokio::task::spawn_blocking(move || repair_pass(&h, &force)).await;
             REPAIR_RUNNING.store(false, Ordering::SeqCst);
         }
         let wait = if first {
