@@ -73,8 +73,7 @@ async function refreshGw() {
 let gwCaptchaPendingLast = false;
 function raiseGwCaptcha() {
   toast(t("gw.captchaRequired"), "warn", t("gw.captchaRequiredDetail"));
-  // 预解窗口负责解票；需人工时让它显形（独立弹窗不再是主路径）
-  invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+  // 预解循环会自动加速补票并按需自行显形，主窗不打断
 }
 
 function copyText(text) {

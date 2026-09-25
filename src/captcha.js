@@ -1,6 +1,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { init, t, lang, stripErr } from "./i18n.js";
 
 const SDK_URL = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
@@ -40,8 +41,9 @@ function loadSdk() {
 let submitted = false;
 let region = null;
 let tracelessTimer = 0;
-// 验证码窗口复用：claim 领取 / gateway 网关请求挑战。模式由后端在开窗时
-// 写入（captcha_get_mode），不依赖 URL——dev 与打包环境行为一致。
+// 验证码窗口复用：模式由窗口 label 决定（无共享状态、无竞态）——
+//   "captcha-warmup" → 网关预解循环（隐藏后台解票，需人工时自行显形）
+//   "captcha"        → claim 领取流程（或网关交互救援，经 captcha_get_mode）
 let mode = "claim";
 
 /// 预解循环的单轮调度：池满等久一点，缺票（或 urgent）立即再来一张。
@@ -60,6 +62,8 @@ async function runWarmup() {
   // 隐藏窗口：静默解票入池。traceless 通过即结束本轮；需要人工时显形。
   try {
     mode = "gateway-warmup";
+    document.title = "Z·GATEWAY · warmup";
+    status(t("c.traceless"));
     const st = await invoke("gateway_captcha_pool_status").catch(() => null);
     if (st && st.size >= (st.max ?? 12)) {
       setTimeout(() => location.reload(), 5000);
@@ -113,13 +117,14 @@ async function run() {
   document.querySelector(".cap-foot").textContent = t("c.foot");
   status(t("c.preparing"));
 
-  try {
-    mode = await invoke("captcha_get_mode").catch(() => "claim");
-  } catch { }
-  if (mode === "gateway-warmup") {
+  if (getCurrentWindow().label === "captcha-warmup") {
+    mode = "gateway-warmup";
     await runWarmup();
     return;
   }
+  try {
+    mode = await invoke("captcha_get_mode").catch(() => "claim");
+  } catch { }
   let cfg;
   try {
     cfg = await invoke(mode === "gateway" ? "gateway_captcha_config" : "claim_captcha_config");

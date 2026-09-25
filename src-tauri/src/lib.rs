@@ -272,7 +272,7 @@ async fn claim_start(
         config: acc.config,
         device_mid: mid,
     });
-    open_captcha_window(&app, auto.unwrap_or(false), "claim")?;
+    open_captcha_window(&app, auto.unwrap_or(false))?;
     Ok(json!({ "account": acc.name, "plan": display }))
 }
 
@@ -793,23 +793,29 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
     });
 }
 
-static CAPTCHA_MODE: Mutex<&'static str> = Mutex::new("claim");
-
-/// 验证码弹窗启动时查询自己的用途（claim 领取 / gateway 网关请求挑战），
-/// 决定配置与提交命令——两套流程走同一块阿里云场景，但提交目标不同。
-#[tauri::command]
-async fn captcha_get_mode() -> Result<String, String> {
-    Ok(CAPTCHA_MODE.lock().unwrap_or_else(|e| e.into_inner()).to_string())
-}
-
-/// 网关挑战用的验证码配置（与 claim 同一 client/configs 端点，独立命令避免语义耦合）。
+/// 网关挑战用的验证码配置（与 claim 同一 client/configs 端点）。
+/// 拉取失败时用 zcode2api 同款硬编码兜底场景，预解循环不至于卡死。
 #[tauri::command]
 async fn gateway_captcha_config() -> Result<claim::CaptchaConfig, String> {
-    claim::fetch_captcha_config()
+    const FALLBACK: claim::CaptchaConfig = claim::CaptchaConfig {
+        enabled: true,
+        region: String::new(),
+        prefix: String::new(),
+        scene_id: String::new(),
+    };
+    let _ = FALLBACK;
+    match claim::fetch_captcha_config() {
+        Ok(c) if c.enabled && !c.scene_id.trim().is_empty() => Ok(c),
+        _ => Ok(claim::CaptchaConfig {
+            enabled: true,
+            region: "sgp".into(),
+            prefix: "no8xfe".into(),
+            scene_id: "11xygtvd".into(),
+        }),
+    }
 }
 
-fn open_captcha_window(app: &AppHandle, auto: bool, mode: &'static str) -> Result<(), String> {
-    *CAPTCHA_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+fn open_captcha_window(app: &AppHandle, auto: bool) -> Result<(), String> {
     let (w, h) = (380.0, 320.0);
     if let Some(win) = app.get_webview_window("captcha") {
         let _ = win.eval("location.reload()");
@@ -1307,11 +1313,16 @@ async fn gateway_captcha_warmup_stop(app: AppHandle) -> Result<(), String> {
 }
 
 /// 预解窗口可见性：traceless 需要人工时显示，完成后隐藏。
+/// 窗口不存在（被手动关闭）时自动重建，救援路径永远可达。
 #[tauri::command]
 async fn gateway_captcha_warmup_visibility(app: AppHandle, visible: bool) -> Result<(), String> {
+    if app.get_webview_window(WARMUP_LABEL).is_none() {
+        gateway_captcha_warmup_start(app.clone()).await?;
+    }
     if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
         if visible {
             let _ = w.show();
+            let _ = w.unminimize();
             let _ = w.set_focus();
         } else {
             let _ = w.hide();
@@ -1321,14 +1332,6 @@ async fn gateway_captcha_warmup_visibility(app: AppHandle, visible: bool) -> Res
 }
 
 /// 前端收到 gateway://captcha-required 后调用：拉起验证码窗口。
-#[tauri::command]
-async fn gateway_open_captcha(app: AppHandle) -> Result<(), String> {
-    open_captcha_window(&app, false, "gateway")?;
-    if let Some(w) = app.get_webview_window("captcha") {
-        let _ = w.set_title(&format!("{} · Z·GATEWAY", i18n::tr("title.captcha")));
-    }
-    Ok(())
-}
 
 #[tauri::command]
 async fn gateway_pool_preview() -> Result<serde_json::Value, String> {
@@ -1390,9 +1393,7 @@ pub fn run() {
             gateway_clear_logs,
             open_gateway_logs,
             gateway_captcha_submit,
-            gateway_open_captcha,
             gateway_captcha_config,
-            captcha_get_mode,
             gateway_captcha_pool_status,
             gateway_captcha_warmup_start,
             gateway_captcha_warmup_stop,

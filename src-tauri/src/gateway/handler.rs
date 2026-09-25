@@ -395,8 +395,21 @@ async fn run_attempt(
     // 5. Client signing V4 (coding-plan only, fail-open).
     let mut send_pairs = header_pairs.clone();
     if entry.plan == "start-plan" {
-        // 预挂用户已解的人机验证票（单次有效）：有票可直接通过，免一次挑战往返
-        if let Some(t) = super::captcha::take_ticket() {
+        // zcode2api 式主动供票：start-plan 请求发起前先取票预挂，正常永不遇挑战。
+        // 池空时给预解循环 ≤8s 窗口（traceless 一轮秒级，urgent 已加速）——
+        // 这是等后台自动解票，不是等人工；超时才裸奔（挑战后走故障转移）。
+        let mut ticket = super::captcha::take_ticket();
+        if ticket.is_none() {
+            super::captcha::mark_urgent();
+            for _ in 0..16 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Some(t) = super::captcha::take_ticket() {
+                    ticket = Some(t);
+                    break;
+                }
+            }
+        }
+        if let Some(t) = ticket {
             send_pairs.extend(super::captcha::ticket_headers(&t));
         }
     }
