@@ -34,8 +34,6 @@ pub mod upstream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
-
 use serde::Serialize;
 use serde_json::Value;
 
@@ -65,30 +63,6 @@ impl GatewayConfig {
             per_account_concurrency: s.gateway_per_account_concurrency(),
         }
     }
-}
-
-static APP: Mutex<Option<AppHandle>> = Mutex::new(None);
-
-/// 记录 AppHandle，供网关请求路径向上行窗口发事件（验证码弹窗等）。
-pub fn set_app_handle(app: AppHandle) {
-    *APP.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
-}
-
-fn app_handle() -> Option<AppHandle> {
-    APP.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-/// 向主窗口请求人机验证（前端监听 gateway://captcha-required 后拉起弹窗）。
-pub fn request_captcha_interactive() -> bool {
-    if !captcha::begin_interactive() {
-        return false; // 已有待处理的弹窗请求
-    }
-    if let Some(app) = app_handle() {
-        let _ = app.emit("gateway://captcha-required", serde_json::json!({}));
-        return true;
-    }
-    captcha::end_interactive();
-    false
 }
 
 struct GatewayRuntime {
@@ -244,6 +218,7 @@ pub async fn status_value() -> Value {
         "port": config.port,
         "apiKeySet": config.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false),
         "perAccountConcurrency": config.per_account_concurrency,
+        "captchaPending": captcha::interactive_pending(),
         "accounts": accounts,
     })
 }

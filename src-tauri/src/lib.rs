@@ -1326,7 +1326,6 @@ pub fn run() {
         })
         .setup(|app| {
             i18n::init_from_settings(&store::load_settings(&Paths::detect()));
-            gateway::set_app_handle(app.handle().clone());
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }

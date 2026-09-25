@@ -487,7 +487,7 @@ async fn run_attempt(
     // start-plan 人机验证挑战（响应头 / 3007 / 文案）→ 请求 UI 弹窗解票，
     // 等到票后用同账号重试一次；期间并发许可保持占用。
     if entry.plan == "start-plan" && super::captcha::is_challenge(status, &upstream_headers, &body_text) {
-        let _raised = super::request_captcha_interactive();
+        super::captcha::begin_interactive(); // UI 轮询 gw/status 后拉起弹窗
         let ticket = super::captcha::wait_ticket(std::time::Duration::from_secs(120)).await;
         super::captcha::end_interactive();
         let Some(ticket) = ticket else {

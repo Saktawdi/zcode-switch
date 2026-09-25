@@ -63,6 +63,8 @@ async function refresh() {
 
 async function refreshGw() {
   try { gw = await invoke("gateway_status"); } catch { /* 网关状态缺失不阻塞主界面 */ }
+  // 轮询发现人机验证待处理 → 拉起验证码弹窗（30s 去抖）
+  if (gw?.captchaPending) raiseGwCaptcha();
 }
 
 let gwCaptchaRaisedAt = 0;
@@ -1061,10 +1063,6 @@ listen("oauth://done", (ev) => {
   }
   toast(t("m.oauthOk", { name: p.name }), "ok", t("m.oauthOkDetail"));
   refresh().then(() => { if (!uiLocked()) { render(); enrollAccounts(); } }).catch(() => {});
-});
-
-listen("gateway://captcha-required", () => {
-  raiseGwCaptcha();
 });
 
 listen("state-changed", () => {

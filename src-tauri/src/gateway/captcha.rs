@@ -82,6 +82,12 @@ pub fn end_interactive() {
     INTERACTIVE_PENDING.store(false, Ordering::SeqCst);
 }
 
+/// UI 轮询用：是否有人机验证待处理（网关侧不直接发 tauri 事件，
+/// 避免把 GUI 链接依赖拉进非 GUI 上下文）。
+pub fn interactive_pending() -> bool {
+    INTERACTIVE_PENDING.load(Ordering::SeqCst)
+}
+
 fn ticket_cell() -> std::sync::MutexGuard<'static, Option<Ticket>> {
     TICKET.lock().unwrap_or_else(|e| e.into_inner())
 }
