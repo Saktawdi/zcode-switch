@@ -44,22 +44,27 @@ function rowsHtml() {
   const list = logs.filter((l) => !filterAccount || l.account === filterAccount);
   if (!list.length) return `<div class="gwlog-empty">${t("gw.logsEmpty")}</div>`;
   return list.map((l) => {
+    const isEvent = l.route === "repair" || l.route === "captcha";
     const st = l.route === "repair"
       ? `<span class="gwlog-st repair">REPAIR</span>`
-      : `<span class="gwlog-st ${statusClass(l.status)}">${l.status}</span>`;
+      : l.route === "captcha"
+        ? `<span class="gwlog-st repair">CAPTCHA</span>`
+        : `<span class="gwlog-st ${statusClass(l.status)}">${l.status}</span>`;
     const err = l.error ? `<div class="gwlog-err" title="${l.error.replace(/"/g, "&quot;")}">${l.error}</div>` : "";
+    const detail = isEvent && l.error ? "" : l.model;
     return `
     <div class="gwlog-row">
       <div class="gwlog-main">
         <span class="gwlog-time">${fmtTime(l.ts)}</span>
         ${st}
-        <span class="gwlog-route">${l.route === "repair" ? "repair" : `${l.format} · ${l.route}`}</span>
-        <span class="gwlog-model">${l.model}</span>
+        <span class="gwlog-route">${isEvent ? l.route : `${l.format} · ${l.route}`}</span>
+        <span class="gwlog-model">${detail}</span>
         <span class="gwlog-acct" title="${l.account || ""}">${l.account || "—"}</span>
         <span class="gwlog-plan">${l.provider || ""}${l.plan ? ` · ${l.plan}` : ""}</span>
         <span class="gwlog-ms">${l.ms ? l.ms + "ms" : ""}${l.attempts > 1 ? ` · ×${l.attempts}` : ""}</span>
       </div>
       ${err}
+      ${isEvent && l.error ? "" : ""}
     </div>`;
   }).join("");
 }

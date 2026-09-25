@@ -46,6 +46,11 @@ let tracelessTimer = 0;
 //   "captcha"        → claim 领取流程（或网关交互救援，经 captcha_get_mode）
 let mode = "claim";
 
+/// 验证码链路埋点（进请求日志窗口，route=captcha）
+function gwlog(stage, detail) {
+  return invoke("gateway_captcha_event", { stage, detail: detail ?? null }).catch(() => {});
+}
+
 /// 预解循环的单轮调度：池满等久一点，缺票（或 urgent）立即再来一张。
 async function warmupNextRound() {
   let st = null;
@@ -55,29 +60,58 @@ async function warmupNextRound() {
   const max = st?.max ?? 12;
   const urgent = !!st?.urgent;
   const delay = size >= max ? 5000 : (size >= min && !urgent ? 2500 : 150);
+  gwlog("round-next", `pool=${size}/${max} urgent=${urgent} next=${delay}ms`);
   setTimeout(() => location.reload(), delay);
 }
 
+/// 人工救援守卫：显形后 success 迟迟不来（SDK 回源卡住）→ 强制重来，
+/// 否则窗口永远停在「验证通过！」而池里没有票。
+function armRescueGuard(ms) {
+  clearTimeout(window.__gwRescueGuard);
+  window.__gwRescueGuard = setTimeout(() => {
+    gwlog("success-stuck", `no success callback ${ms}ms after pass — reloading`);
+    location.reload();
+  }, ms);
+}
+function disarmRescueGuard() { clearTimeout(window.__gwRescueGuard); }
+
 async function runWarmup() {
-  // 隐藏窗口：静默解票入池。traceless 通过即结束本轮；需要人工时显形。
+  // 隐藏问题不存在——本窗常驻可见（微型）。先归位微型形态（幂等）。
   try {
     mode = "gateway-warmup";
     document.title = "Z·GATEWAY · warmup";
     document.body.classList.add("warmup-mini");
-    status(t("c.traceless"));
+    await invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
     const st = await invoke("gateway_captcha_pool_status").catch(() => null);
     if (st && st.size >= (st.max ?? 12)) {
+      gwlog("round-skip", `pool full ${st.size}/${st.max}`);
       setTimeout(() => location.reload(), 5000);
       return;
     }
-    const cfg = await invoke("gateway_captcha_config");
-    if (!cfg?.enabled || !cfg.scene_id) return;
+    let cfg;
+    let fallback = false;
+    try {
+      cfg = await invoke("gateway_captcha_config");
+    } catch (e) {
+      gwlog("config-fail", String(e));
+      cfg = { enabled: true, region: "sgp", prefix: "no8xfe", scene_id: "11xygtvd" };
+      fallback = true;
+    }
+    if (!cfg?.enabled || !cfg.scene_id) {
+      gwlog("config-disabled", `enabled=${cfg?.enabled} scene=${cfg?.scene_id || "-"}`);
+      setTimeout(() => location.reload(), 10000);
+      return;
+    }
+    gwlog("config-ok", `scene=${cfg.scene_id} prefix=${cfg.prefix} region=${cfg.region}${fallback ? " (fallback)" : ""}`);
     region = cfg.region || null;
     await loadSdk();
     window.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix };
+    gwlog("sdk-init", `scene=${cfg.scene_id}`);
     window.initAliyunCaptcha({
       SceneId: cfg.scene_id,
       mode: "popup",
+      region: cfg.region,
+      prefix: cfg.prefix,
       language: lang() === "en" ? "en" : "zh-CN",
       showErrorTip: false,
       element: "#cap-holder",
@@ -85,34 +119,42 @@ async function runWarmup() {
       getInstance: (instance) => {
         if (typeof instance.startTracelessVerification === "function") {
           instance.startTracelessVerification();
-          // traceless 迟迟不回来 → 放大窗口请人工，避免静默卡死
+          gwlog("traceless-start");
+          // traceless 迟迟不回来 → 放大窗口请人工；守卫兜底防卡死
           tracelessTimer = setTimeout(() => {
+            gwlog("traceless-stuck", "6s no result — rescue window");
             document.body.classList.remove("warmup-mini");
             invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
             status(t("c.interactive"));
             $btn.hidden = false;
-            tracelessTimer = setTimeout(warmupNextRound, 60000);
+            armRescueGuard(30000);
           }, 6000);
         } else {
+          gwlog("traceless-unavailable", "SDK has no startTracelessVerification");
           document.body.classList.remove("warmup-mini");
           invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
           status(t("c.interactive"));
           $btn.hidden = false;
+          armRescueGuard(45000);
         }
       },
-      success: (param) => submit(typeof param === "string" ? param : param?.captchaVerifyParam),
-      fail: () => {
-        document.body.classList.remove("warmup-mini");
-        invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
-        status(t("c.interactive"));
-        $btn.hidden = false;
-        tracelessTimer = setTimeout(warmupNextRound, 60000);
+      success: (param) => {
+        disarmRescueGuard();
+        submitted = false; // 每轮独立：守卫 reload 后旧行为不残留
+        submit(typeof param === "string" ? param : param?.captchaVerifyParam);
       },
-      onError: () => {
-        tracelessTimer = setTimeout(warmupNextRound, 8000);
+      fail: (p) => {
+        // 拖拽失败：SDK 界面可重试，不 reload 打断用户；只埋点+延长守卫
+        gwlog("sdk-fail", typeof p === "string" ? p.slice(0, 120) : JSON.stringify(p).slice(0, 120));
+        armRescueGuard(60000);
+      },
+      onError: (p) => {
+        gwlog("sdk-error", typeof p === "string" ? p.slice(0, 120) : JSON.stringify(p).slice(0, 120));
+        tracelessTimer = setTimeout(() => location.reload(), 8000);
       },
     });
-  } catch {
+  } catch (e) {
+    gwlog("warmup-crash", String(e));
     setTimeout(() => location.reload(), 8000);
   }
 }
@@ -168,11 +210,15 @@ async function run() {
     submitted = true;
     clearTimeout(tracelessTimer);
     if (mode === "gateway-warmup") {
-      // 预解循环：入池 → 恢复微型预解形态 → 按池容量决定下一轮
+      // 预解循环：入池 → 恢复微型预解形态 → 下一轮
+      gwlog("success", `verifyParam len=${param.length}`);
       invoke("gateway_captcha_submit", { param, region })
-        .then(() => invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {}))
-        .catch(() => {})
-        .finally(() => setTimeout(warmupNextRound, 400));
+        .then((r) => gwlog("pool-push", `accepted=${!!r?.accepted} size=${r?.size ?? "?"}`))
+        .catch((e) => gwlog("pool-push-fail", String(e)))
+        .finally(() => {
+          invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
+          warmupNextRound();
+        });
       return;
     }
     status(mode === "gateway" ? t("c.passedGw") : t("c.passed"));

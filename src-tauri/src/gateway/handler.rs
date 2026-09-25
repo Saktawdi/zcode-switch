@@ -398,6 +398,7 @@ async fn run_attempt(
         // zcode2api 式主动供票：start-plan 请求发起前先取票预挂，正常永不遇挑战。
         // 池空时给预解循环 ≤8s 窗口（traceless 一轮秒级，urgent 已加速）——
         // 这是等后台自动解票，不是等人工；超时才裸奔（挑战后走故障转移）。
+        let wait_started = std::time::Instant::now();
         let mut ticket = super::captcha::take_ticket();
         if ticket.is_none() {
             super::captcha::mark_urgent();
@@ -409,6 +410,19 @@ async fn run_attempt(
                 }
             }
         }
+        super::logs::push(super::logs::GatewayLogEntry {
+            ts: chrono::Utc::now().timestamp_millis(),
+            route: "captcha".into(),
+            format: "captcha".into(),
+            model: "ticket-wait".into(),
+            account: Some(entry.name.clone()),
+            provider: Some(entry.provider.clone()),
+            plan: Some(entry.plan.clone()),
+            status: if ticket.is_some() { 1 } else { 0 },
+            ms: wait_started.elapsed().as_millis() as u64,
+            attempts: 1,
+            error: None,
+        });
         if let Some(t) = ticket {
             send_pairs.extend(super::captcha::ticket_headers(&t));
         }

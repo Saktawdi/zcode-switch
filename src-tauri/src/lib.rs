@@ -793,6 +793,26 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
     });
 }
 
+/// 验证码链路埋点：warmup/救援的每一步都进请求日志（route=captcha），
+/// 排查"池为什么空/卡在哪一步"不再靠猜。
+#[tauri::command]
+async fn gateway_captcha_event(stage: String, detail: Option<String>) -> Result<(), String> {
+    gateway::logs::push(gateway::logs::GatewayLogEntry {
+        ts: chrono::Utc::now().timestamp_millis(),
+        route: "captcha".into(),
+        format: "captcha".into(),
+        model: stage,
+        account: None,
+        provider: None,
+        plan: None,
+        status: 0,
+        ms: 0,
+        attempts: 1,
+        error: detail.filter(|d| !d.trim().is_empty()),
+    });
+    Ok(())
+}
+
 /// 网关挑战用的验证码配置（与 claim 同一 client/configs 端点）。
 /// 拉取失败时用 zcode2api 同款硬编码兜底场景，预解循环不至于卡死。
 #[tauri::command]
@@ -1419,6 +1439,7 @@ pub fn run() {
             open_gateway_logs,
             gateway_captcha_submit,
             gateway_captcha_config,
+            gateway_captcha_event,
             gateway_captcha_pool_status,
             gateway_captcha_warmup_start,
             gateway_captcha_warmup_stop,
