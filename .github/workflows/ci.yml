@@ -22,6 +22,26 @@ jobs:
         run: cargo test --lib
         working-directory: src-tauri
 
+  frontend:
+    name: frontend build (i18n + vite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: i18n keys check
+        run: npm run check:i18n
+
+      - name: vite build
+        run: npm run build
+
   check-portability:
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
