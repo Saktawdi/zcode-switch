@@ -18,6 +18,7 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         settings: resolve(__dirname, "settings.html"),
         captcha: resolve(__dirname, "captcha.html"),
+        gateway: resolve(__dirname, "gateway.html"),
       },
     },
   },

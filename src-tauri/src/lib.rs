@@ -1190,6 +1190,65 @@ async fn gateway_set_account(app: AppHandle, id: String, enabled: bool) -> Resul
 }
 
 #[tauri::command]
+async fn gateway_logs(limit: Option<u32>) -> Result<Vec<gateway::logs::GatewayLogEntry>, String> {
+    Ok(gateway::logs::snapshot(limit.unwrap_or(200).clamp(1, 500) as usize))
+}
+
+#[tauri::command]
+async fn gateway_clear_logs() -> Result<(), String> {
+    gateway::logs::clear();
+    Ok(())
+}
+
+/// 打开独立的网关请求日志窗口。
+#[tauri::command]
+async fn open_gateway_logs(app: AppHandle) -> Result<(), String> {
+    let (w, h) = (760.0, 560.0);
+    if let Some(win) = app.get_webview_window("gatewaylogs") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        "gatewaylogs",
+        tauri::WebviewUrl::App("gateway.html".into()),
+    )
+    .title(i18n::tr("gw.logsTitle"))
+    .theme(Some(tauri::Theme::Dark))
+    .background_color(tauri::window::Color(10, 10, 12, 255))
+    .inner_size(w, h)
+    .min_inner_size(600.0, 400.0)
+    .resizable(true)
+    .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server")
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    let _ = win.show();
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// 网关模式的人机验证提交：票入共享状态并唤醒等待中的请求。
+#[tauri::command]
+async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<String>) -> Result<(), String> {
+    gateway::captcha::store_ticket(&param, region);
+    close_captcha_window(&app);
+    Ok(())
+}
+
+/// 前端收到 gateway://captcha-required 后调用：拉起验证码窗口。
+#[tauri::command]
+async fn gateway_open_captcha(app: AppHandle) -> Result<(), String> {
+    open_captcha_window(&app, false)?;
+    if let Some(w) = app.get_webview_window("captcha") {
+        let _ = w.set_title(&format!("{} · Z·GATEWAY", i18n::tr("title.captcha")));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn gateway_pool_preview() -> Result<serde_json::Value, String> {
     Ok(gateway::pool_status_value().await)
 }
@@ -1245,6 +1304,11 @@ pub fn run() {
             gateway_set_config,
             gateway_set_account,
             gateway_pool_preview,
+            gateway_logs,
+            gateway_clear_logs,
+            open_gateway_logs,
+            gateway_captcha_submit,
+            gateway_open_captcha,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1262,6 +1326,7 @@ pub fn run() {
         })
         .setup(|app| {
             i18n::init_from_settings(&store::load_settings(&Paths::detect()));
+            gateway::set_app_handle(app.handle().clone());
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }

@@ -213,6 +213,7 @@ const ZH: &[(&str, &str)] = &[
     ("cli.json_fail", "JSON 解析失败：{e}"),
     ("err.lang.unknown", "未知语言：{lang}（支持 zh / en）"),
     ("err.gateway.bad_port", "网关端口无效（1-65535）"),
+    ("gw.logsTitle", "网关请求日志"),
     ("err.gateway.bad_concurrency", "单号并发上限无效（1-64）"),
     ("gateway.tray.label", "Z·GATEWAY"),
 ];
@@ -371,6 +372,7 @@ const EN: &[(&str, &str)] = &[
     ("cli.json_fail", "JSON parse failed: {e}"),
     ("err.lang.unknown", "Unknown language: {lang} (supported: zh / en)"),
     ("err.gateway.bad_port", "Invalid gateway port (1-65535)"),
+    ("gw.logsTitle", "Gateway request log"),
     ("err.gateway.bad_concurrency", "Invalid per-account concurrency (1-64)"),
     ("gateway.tray.label", "Z·GATEWAY"),
 ];

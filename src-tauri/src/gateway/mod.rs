@@ -16,11 +16,14 @@
 //!   - lifecycle is embedded in the Tauri app (settings toggle, port, key).
 
 pub mod body;
+pub mod captcha;
 pub mod handler;
+pub mod logs;
 pub mod identity;
 pub mod models;
 pub mod pool;
 pub mod prompt;
+pub mod repair;
 pub mod routing;
 pub mod server;
 pub mod signing;
@@ -30,6 +33,8 @@ pub mod upstream;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tauri::{AppHandle, Emitter};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -60,6 +65,30 @@ impl GatewayConfig {
             per_account_concurrency: s.gateway_per_account_concurrency(),
         }
     }
+}
+
+static APP: Mutex<Option<AppHandle>> = Mutex::new(None);
+
+/// 记录 AppHandle，供网关请求路径向上行窗口发事件（验证码弹窗等）。
+pub fn set_app_handle(app: AppHandle) {
+    *APP.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
+}
+
+fn app_handle() -> Option<AppHandle> {
+    APP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// 向主窗口请求人机验证（前端监听 gateway://captcha-required 后拉起弹窗）。
+pub fn request_captcha_interactive() -> bool {
+    if !captcha::begin_interactive() {
+        return false; // 已有待处理的弹窗请求
+    }
+    if let Some(app) = app_handle() {
+        let _ = app.emit("gateway://captcha-required", serde_json::json!({}));
+        return true;
+    }
+    captcha::end_interactive();
+    false
 }
 
 struct GatewayRuntime {
@@ -118,6 +147,7 @@ fn build_context(per_account_concurrency: u32) -> handler::GatewayContext {
 /// the caller; the serve loop runs on Tauri's async runtime.
 pub async fn start(config: GatewayConfig) -> Result<(), String> {
     stop().await;
+    let paths = Paths::detect();
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -142,6 +172,15 @@ pub async fn start(config: GatewayConfig) -> Result<(), String> {
             })
             .await;
     });
+
+    // coding-plan key 自愈循环（随网关生命周期）
+    {
+        let home = paths.home.clone();
+        let repair_rx = shutdown_tx.subscribe();
+        tauri::async_runtime::spawn(async move {
+            repair::run_loop(home, repair_rx).await;
+        });
+    }
 
     *runtime_cell() = Some(GatewayRuntime {
         shutdown_tx,
@@ -433,7 +472,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
             "messages": [{ "role": "user", "content": "hi" }],
             "max_tokens": 100
         }).to_string();
-        let resp = handler::handle_completion(&ctx, &headers, Some(body), handler::Format::OpenAi).await;
+        let resp = handler::handle_completion(&ctx, &headers, Some(body), handler::Format::OpenAi, "/v1/chat/completions").await;
         assert_eq!(resp.status().as_u16(), 200);
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -456,7 +495,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
             "stream": true,
             "messages": [{ "role": "user", "content": "hi" }]
         }).to_string();
-        let resp = handler::handle_completion(&ctx, &headers, Some(body), handler::Format::OpenAi).await;
+        let resp = handler::handle_completion(&ctx, &headers, Some(body), handler::Format::OpenAi, "/v1/chat/completions").await;
         assert_eq!(resp.status().as_u16(), 200);
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let text = String::from_utf8_lossy(&bytes);
@@ -479,7 +518,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
             "max_tokens": 128,
             "messages": [{ "role": "user", "content": "hi" }]
         }).to_string();
-        let resp = handler::handle_completion(&ctx, &headers, Some(body), handler::Format::Anthropic).await;
+        let resp = handler::handle_completion(&ctx, &headers, Some(body), handler::Format::Anthropic, "/v1/messages").await;
         assert_eq!(resp.status().as_u16(), 200);
         let account_header = resp
             .headers()

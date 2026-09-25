@@ -40,6 +40,8 @@ function loadSdk() {
 let submitted = false;
 let region = null;
 let tracelessTimer = 0;
+// 验证码窗口复用：claim 流程 / 网关请求挑战（captcha.html?mode=gateway）
+const mode = new URLSearchParams(location.search).get("mode") || "claim";
 
 async function run() {
   try {
@@ -83,8 +85,9 @@ async function run() {
     if (submitted || !param || !param.trim()) return;
     submitted = true;
     clearTimeout(tracelessTimer);
-    status(t("c.passed"));
-    invoke("claim_captcha_submit", { param, region }).catch((e) => {
+    status(mode === "gateway" ? t("c.passedGw") : t("c.passed"));
+    const cmd = mode === "gateway" ? "gateway_captcha_submit" : "claim_captcha_submit";
+    invoke(cmd, { param, region }).catch((e) => {
       status(t("c.claimReqFail"), "err");
       detail(stripErr(e));
     });

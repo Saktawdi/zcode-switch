@@ -111,13 +111,22 @@ async fn gw_status(State(state): State<Arc<GatewayState>>) -> Response {
         .into_response()
 }
 
+/// GET /gw/logs — 最近的网关请求日志（便于 curl 排查）。
+async fn gw_logs() -> Response {
+    (
+        StatusCode::OK,
+        axum::Json(json!({ "logs": super::logs::snapshot(500) })),
+    )
+        .into_response()
+}
+
 async fn chat_completions(
     State(state): State<Arc<GatewayState>>,
     headers: axum::http::HeaderMap,
     body: String,
 ) -> Response {
     let inbound = to_reqwest_headers(&headers);
-    handle_completion(&state.ctx, &inbound, Some(body), Format::OpenAi).await
+    handle_completion(&state.ctx, &inbound, Some(body), Format::OpenAi, "/v1/chat/completions").await
 }
 
 async fn messages(
@@ -126,7 +135,7 @@ async fn messages(
     body: String,
 ) -> Response {
     let inbound = to_reqwest_headers(&headers);
-    handle_completion(&state.ctx, &inbound, Some(body), Format::Anthropic).await
+    handle_completion(&state.ctx, &inbound, Some(body), Format::Anthropic, "/v1/messages").await
 }
 
 fn to_reqwest_headers(headers: &axum::http::HeaderMap) -> reqwest::header::HeaderMap {
@@ -147,6 +156,7 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .route("/", get(health))
         .route("/health", get(health))
         .route("/gw/status", get(gw_status))
+        .route("/gw/logs", get(gw_logs))
         .route("/v1/models", get(handle_list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))

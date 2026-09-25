@@ -65,6 +65,15 @@ async function refreshGw() {
   try { gw = await invoke("gateway_status"); } catch { /* 网关状态缺失不阻塞主界面 */ }
 }
 
+let gwCaptchaRaisedAt = 0;
+function raiseGwCaptcha() {
+  const now = Date.now();
+  if (now - gwCaptchaRaisedAt < 30_000) return;
+  gwCaptchaRaisedAt = now;
+  toast(t("gw.captchaRequired"), "warn", t("gw.captchaRequiredDetail"));
+  invoke("gateway_open_captcha").catch(() => {});
+}
+
 function copyText(text) {
   const ta = document.createElement("textarea");
   ta.value = text;
@@ -164,6 +173,11 @@ const actions = {
       if (r?.running) toast(t("gw.togOnToast"), "ok", t("gw.togOnDetail"));
       else toast(t("gw.togOffToast"));
     });
+  },
+
+  async openGwLogs() {
+    try { await invoke("open_gateway_logs"); }
+    catch (e) { toast(stripErr(e), "err"); }
   },
 
   copyGwBase() {
@@ -830,6 +844,7 @@ function gatewayCardHtml(s) {
       <span class="gw-name">${t("gw.title")}</span>
       <span class="gw-status">${running ? esc(t("gw.on")) : esc(t("gw.off"))}${running ? ` · ${esc(t("gw.listenPort"))} ${port}` : ""}</span>
       <span class="gw-spacer"></span>
+      <button class="icon-btn" title="${t("gw.logsTitle")}" aria-label="${t("gw.logsTitle")}" click="actions.openGwLogs()">${ic("gauge", 15)}</button>
       <button class="icon-btn" title="${t("gw.copyBase")}" aria-label="${t("gw.copyBase")}" click="actions.copyGwBase()">${ic("export", 15)}</button>
       <button class="tog-inline${s.gateway_enabled ? " on" : ""}" role="switch" aria-checked="${s.gateway_enabled}"
         aria-label="${t("gw.title")}" title="${running ? esc(t("gw.togOffToast")) : esc(t("gw.togOnToast"))}"
@@ -1046,6 +1061,10 @@ listen("oauth://done", (ev) => {
   }
   toast(t("m.oauthOk", { name: p.name }), "ok", t("m.oauthOkDetail"));
   refresh().then(() => { if (!uiLocked()) { render(); enrollAccounts(); } }).catch(() => {});
+});
+
+listen("gateway://captcha-required", () => {
+  raiseGwCaptcha();
 });
 
 listen("state-changed", () => {

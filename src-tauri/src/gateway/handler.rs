@@ -173,7 +173,27 @@ pub async fn handle_completion(
     inbound_headers: &reqwest::header::HeaderMap,
     body: Option<String>,
     format: Format,
+    route: &str,
 ) -> axum::response::Response {
+    let started = std::time::Instant::now();
+    // 请求日志：attempt 过程中填充账号/状态，函数尾部落盘（内存环 + 文件）。
+    let log = std::sync::Arc::new(std::sync::Mutex::new(super::logs::GatewayLogEntry {
+        ts: chrono::Utc::now().timestamp_millis(),
+        route: route.to_string(),
+        format: match format { Format::OpenAi => "openai".into(), Format::Anthropic => "anthropic".into() },
+        model: "-".into(),
+        account: None,
+        provider: None,
+        plan: None,
+        status: 0,
+        ms: 0,
+        attempts: 0,
+        error: None,
+    }));
+    {
+        let (model, _) = upstream::peek_meta(body.as_deref());
+        log.lock().unwrap_or_else(|e| e.into_inner()).model = model;
+    }
     // 1. Translate the request body into the Anthropic shape when the client
     //    speaks OpenAI; Anthropic clients pass through.
     let anthropic_body: Option<Value> = match format {
@@ -239,16 +259,19 @@ pub async fn handle_completion(
             break;
         }
         attempts += 1;
-        match run_attempt(ctx, entry, false, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
+        match run_attempt(ctx, entry, false, &log, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
             AttemptOutcome::Terminal(resp) => {
                 terminal = Some(resp);
                 break;
             }
             AttemptOutcome::Busy => busy_count += 1,
             AttemptOutcome::Next(err) => {
-                if err.is_some() {
-                    last_error = err;
+                if let Some((st, _, msg)) = &err {
+                    let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
+                    l.status = *st;
+                    l.error = Some(msg.chars().take(200).collect());
                 }
+                last_error = err;
             }
         }
     }
@@ -257,15 +280,28 @@ pub async fn handle_completion(
     // 而不是立刻对客户端报错。
     if terminal.is_none() && busy_count == attempts {
         attempts += 1;
-        match run_attempt(ctx, &candidates[0], true, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
+        match run_attempt(ctx, &candidates[0], true, &log, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
             AttemptOutcome::Terminal(resp) => terminal = Some(resp),
             AttemptOutcome::Busy => {}
             AttemptOutcome::Next(err) => {
-                if err.is_some() {
-                    last_error = err;
+                if let Some((st, _, msg)) = &err {
+                    let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
+                    l.status = *st;
+                    l.error = Some(msg.chars().take(200).collect());
                 }
+                last_error = err;
             }
         }
+    }
+
+    {
+        let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
+        l.attempts = attempts;
+        l.ms = started.elapsed().as_millis() as u64;
+        if l.status == 0 {
+            l.status = 502;
+        }
+        super::logs::push(l.clone());
     }
 
     if let Some(resp) = terminal {
@@ -283,6 +319,7 @@ async fn run_attempt(
     ctx: &GatewayContext,
     entry: &PoolEntry,
     wait: bool,
+    log: &std::sync::Arc<std::sync::Mutex<super::logs::GatewayLogEntry>>,
     anthropic_body: &Option<Value>,
     raw_body: &Option<String>,
     inbound_headers: &reqwest::header::HeaderMap,
@@ -305,6 +342,12 @@ async fn run_attempt(
     let Some(permit) = permit else {
         return AttemptOutcome::Busy;
     };
+    {
+        let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
+        l.account = Some(entry.name.clone());
+        l.provider = Some(entry.provider.clone());
+        l.plan = Some(entry.plan.clone());
+    }
 
     // 3. Per-account body transform (metadata.user_id carries the account's
     //    own device mid; start-plan gets the identity blocks).
@@ -351,6 +394,12 @@ async fn run_attempt(
 
     // 5. Client signing V4 (coding-plan only, fail-open).
     let mut send_pairs = header_pairs.clone();
+    if entry.plan == "start-plan" {
+        // 预挂用户已解的人机验证票（单次有效）：有票可直接通过，免一次挑战往返
+        if let Some(t) = super::captcha::take_ticket() {
+            send_pairs.extend(super::captcha::ticket_headers(&t));
+        }
+    }
     let mut signed = false;
     if entry.plan == "coding-plan" {
         if let Some(signer) = &ctx.signing {
@@ -389,7 +438,7 @@ async fn run_attempt(
                         let st2 = r2.status().as_u16();
                         if st2 >= 200 && st2 < 300 {
                             return AttemptOutcome::Terminal(
-                                finish_success(ctx, entry, r2, permit, format, model, attempts).await,
+                                finish_success(ctx, entry, r2, permit, format, model, attempts, log).await,
                             );
                         }
                         let body2 = r2.text().await.unwrap_or_default();
@@ -401,7 +450,7 @@ async fn run_attempt(
                                     let st3 = r3.status().as_u16();
                                     if st3 >= 200 && st3 < 300 {
                                         return AttemptOutcome::Terminal(
-                                            finish_success(ctx, entry, r3, permit, format, model, attempts).await,
+                                            finish_success(ctx, entry, r3, permit, format, model, attempts, log).await,
                                         );
                                     }
                                     let body3 = r3.text().await.unwrap_or_default();
@@ -429,11 +478,51 @@ async fn run_attempt(
     }
 
     if (200..300).contains(&status) {
-        return AttemptOutcome::Terminal(finish_success(ctx, entry, resp, permit, format, model, attempts).await);
+        return AttemptOutcome::Terminal(finish_success(ctx, entry, resp, permit, format, model, attempts, log).await);
+    }
+
+    let upstream_headers = resp.headers().clone();
+    let body_text = resp.text().await.unwrap_or_default();
+
+    // start-plan 人机验证挑战（响应头 / 3007 / 文案）→ 请求 UI 弹窗解票，
+    // 等到票后用同账号重试一次；期间并发许可保持占用。
+    if entry.plan == "start-plan" && super::captcha::is_challenge(status, &upstream_headers, &body_text) {
+        let _raised = super::request_captcha_interactive();
+        let ticket = super::captcha::wait_ticket(std::time::Duration::from_secs(120)).await;
+        super::captcha::end_interactive();
+        let Some(ticket) = ticket else {
+            let msg = "需要人机验证：请在 Z·SWITCH 弹窗中完成验证（等待超时）";
+            ctx.pool.report_failure(&entry.account_id, FailureKind::Forbidden, msg.to_string()).await;
+            return AttemptOutcome::Next(Some((403, "captcha_required".into(), format!("{}: {msg}", entry.name))));
+        };
+        let mut retry_pairs = header_pairs.clone();
+        retry_pairs.extend(super::captcha::ticket_headers(&ticket));
+        match send(retry_pairs).await {
+            Ok(r2) => {
+                let st2 = r2.status().as_u16();
+                if (200..300).contains(&st2) {
+                    return AttemptOutcome::Terminal(
+                        finish_success(ctx, entry, r2, permit, format, model, attempts, log).await,
+                    );
+                }
+                let h2 = r2.headers().clone();
+                let b2 = r2.text().await.unwrap_or_default();
+                if super::captcha::is_challenge(st2, &h2, &b2) {
+                    let msg = "人机验证票据被上游拒绝";
+                    ctx.pool.report_failure(&entry.account_id, FailureKind::Forbidden, msg.to_string()).await;
+                    return AttemptOutcome::Next(Some((403, "captcha_failed".into(), format!("{}: {msg}", entry.name))));
+                }
+                record_status_failure(ctx, entry, st2, &b2).await;
+                return AttemptOutcome::Next(Some(last_error_tuple(entry, st2, &b2)));
+            }
+            Err(e) => {
+                ctx.pool.report_failure(&entry.account_id, FailureKind::Network, format!("connect: {e}")).await;
+                return AttemptOutcome::Next(Some((502, "upstream_unreachable".into(), format!("{}: connect failed: {e}", entry.name))));
+            }
+        }
     }
 
     // Failover decision on error statuses.
-    let body_text = resp.text().await.unwrap_or_default();
     record_status_failure(ctx, entry, status, &body_text).await;
     if failure_kind_for_status(status).is_some() {
         return AttemptOutcome::Next(Some(last_error_tuple(entry, status, &body_text)));
@@ -469,8 +558,14 @@ async fn finish_success(
     format: Format,
     model: &str,
     attempts: usize,
+    log: &std::sync::Arc<std::sync::Mutex<super::logs::GatewayLogEntry>>,
 ) -> axum::response::Response {
     ctx.pool.report_success(&entry.account_id).await;
+    {
+        let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
+        l.status = resp.status().as_u16();
+        l.error = None;
+    }
     let status = resp.status();
     let upstream_headers = resp.headers().clone();
     let is_sse = upstream_headers
