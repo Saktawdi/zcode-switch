@@ -795,8 +795,57 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
 
 /// 验证码链路埋点：warmup/救援的每一步都进请求日志（route=captcha），
 /// 排查"池为什么空/卡在哪一步"不再靠猜。
+/// 最近一次 captcha 链路事件的心跳（watchdog 判据）。
+static LAST_CAPTCHA_EVENT: Mutex<i64> = Mutex::new(0);
+
+fn captcha_event_ping() {
+    let now = chrono::Utc::now().timestamp_millis();
+    *LAST_CAPTCHA_EVENT.lock().unwrap_or_else(|e| e.into_inner()) = now;
+}
+
+fn last_captcha_event() -> i64 {
+    *LAST_CAPTCHA_EVENT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 看门狗：池未满且 captcha 链路静默超 45s → 强制 reload 预解窗重开一轮。
+/// JS 侧的兜底定时器在窗口被节流时不可靠，卡死检测必须留在 Rust 侧。
+async fn captcha_watchdog(app: AppHandle) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        if !gateway::is_running() {
+            continue;
+        }
+        let size = gateway::captcha::pool_len();
+        if size >= gateway::captcha::POOL_MIN {
+            continue;
+        }
+        let silent_ms = chrono::Utc::now().timestamp_millis() - last_captcha_event();
+        if silent_ms < 45_000 {
+            continue;
+        }
+        if let Some(w) = app.get_webview_window("captcha-warmup") {
+            let _ = w.eval("location.reload()");
+            gateway::logs::push(gateway::logs::GatewayLogEntry {
+                ts: chrono::Utc::now().timestamp_millis(),
+                route: "captcha".into(),
+                format: "captcha".into(),
+                model: "watchdog-reload".into(),
+                account: None,
+                provider: None,
+                plan: None,
+                status: 0,
+                ms: silent_ms as u64,
+                attempts: 1,
+                error: Some(format!("pool {size}/{} stale {silent_ms}ms — reloaded warmup", gateway::captcha::POOL_MAX)),
+            });
+            captcha_event_ping();
+        }
+    }
+}
+
 #[tauri::command]
 async fn gateway_captcha_event(stage: String, detail: Option<String>) -> Result<(), String> {
+    captcha_event_ping();
     gateway::logs::push(gateway::logs::GatewayLogEntry {
         ts: chrono::Utc::now().timestamp_millis(),
         route: "captcha".into(),
@@ -1209,6 +1258,10 @@ async fn gateway_set_config(
     // 预解窗口随网关联动：开启→常驻后台补充票据池；关闭→回收
     if gateway::is_running() {
         let _ = gateway_captcha_warmup_start(app.clone()).await;
+        let wd = app.clone();
+        tauri::async_runtime::spawn(async move {
+            captcha_watchdog(wd).await;
+        });
     } else {
         let _ = gateway_captcha_warmup_stop(app.clone()).await;
     }
@@ -1326,7 +1379,11 @@ async fn gateway_captcha_warmup_start(app: AppHandle) -> Result<bool, String> {
     .maximizable(false)
     .minimizable(false)
     .skip_taskbar(true)
-    .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server")
+    // 被遮挡的窗口会被 Chromium 判定 hidden → timer/rAF 冻结 → 无痕验证
+    // 与兜底定时器全部停摆（v1.14 实测）。三个开关禁掉全部后台节流。
+    .additional_browser_args(
+        "--disable-backgrounding-occluded-windows --disable-background-timer-throttling --disable-renderer-backgrounding --disable-features=intensive-wake-up-throttling,msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server",
+    )
     .build()
     .map_err(|e| e.to_string())?;
     park_warmup_window(&win);
@@ -1476,7 +1533,11 @@ pub fn run() {
                 if cfg.enabled {
                     match gateway::start(cfg).await {
                         Ok(()) => {
-                            let _ = gateway_captcha_warmup_start(setup_handle).await;
+                            let _ = gateway_captcha_warmup_start(setup_handle.clone()).await;
+                            let wd = setup_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                captcha_watchdog(wd).await;
+                            });
                         }
                         Err(e) => eprintln!("gateway start failed: {e}"),
                     }
