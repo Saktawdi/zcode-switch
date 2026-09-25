@@ -1180,6 +1180,12 @@ async fn gateway_set_config(
     let paths = Paths::detect();
     let cfg = gateway::GatewayConfig::from_settings(&load_settings(&paths));
     gateway::apply(cfg).await?;
+    // 预解窗口随网关联动：开启→常驻后台补充票据池；关闭→回收
+    if gateway::is_running() {
+        let _ = gateway_captcha_warmup_start(app.clone()).await;
+    } else {
+        let _ = gateway_captcha_warmup_stop(app.clone()).await;
+    }
     let status = gateway::status_value().await;
     let _ = app.emit("state-changed", ());
     Ok(status)
@@ -1246,11 +1252,71 @@ async fn open_gateway_logs(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 网关模式的人机验证提交：票入共享状态并唤醒等待中的请求。
+/// 网关模式的人机验证提交：票入预解池（热路径按需取用）。
+/// 池满则拒绝（warmup 循环据此退避，避免过度解票）。
 #[tauri::command]
-async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<String>) -> Result<(), String> {
-    gateway::captcha::store_ticket(&param, region);
+async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<String>) -> Result<serde_json::Value, String> {
+    let accepted = gateway::captcha::push_ticket(&param, region);
     close_captcha_window(&app);
+    Ok(json!({ "accepted": accepted, "size": gateway::captcha::pool_len() }))
+}
+
+/// 预解池状态：warmup 循环的节流依据（zcode-api 池的 min/max 语义）。
+#[tauri::command]
+async fn gateway_captcha_pool_status() -> Result<serde_json::Value, String> {
+    Ok(json!({
+        "size": gateway::captcha::pool_len(),
+        "min": gateway::captcha::POOL_MIN,
+        "max": gateway::captcha::POOL_MAX,
+        "urgent": gateway::captcha::urgent(),
+    }))
+}
+
+const WARMUP_LABEL: &str = "captcha-warmup";
+
+/// 启动隐藏预解窗口（网关开启时常驻，后台补充票据池）。
+#[tauri::command]
+async fn gateway_captcha_warmup_start(app: AppHandle) -> Result<bool, String> {
+    if app.get_webview_window(WARMUP_LABEL).is_some() {
+        return Ok(true);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        WARMUP_LABEL,
+        tauri::WebviewUrl::App("captcha.html".into()),
+    )
+    .title("Z·GATEWAY warmup")
+    .theme(Some(tauri::Theme::Dark))
+    .inner_size(380.0, 320.0)
+    .visible(false)
+    .skip_taskbar(true)
+    .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-proxy-server")
+    .build()
+    .map_err(|e| e.to_string())?;
+    let _ = win.hide();
+    Ok(true)
+}
+
+/// 关闭预解窗口（网关停止时调用）。
+#[tauri::command]
+async fn gateway_captcha_warmup_stop(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
+        let _ = w.close();
+    }
+    Ok(())
+}
+
+/// 预解窗口可见性：traceless 需要人工时显示，完成后隐藏。
+#[tauri::command]
+async fn gateway_captcha_warmup_visibility(app: AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
+        if visible {
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else {
+            let _ = w.hide();
+        }
+    }
     Ok(())
 }
 
@@ -1327,6 +1393,10 @@ pub fn run() {
             gateway_open_captcha,
             gateway_captcha_config,
             captcha_get_mode,
+            gateway_captcha_pool_status,
+            gateway_captcha_warmup_start,
+            gateway_captcha_warmup_stop,
+            gateway_captcha_warmup_visibility,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1348,13 +1418,17 @@ pub fn run() {
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }
-            // 内嵌网关：设置里开启即随应用启动
-            tauri::async_runtime::spawn(async {
+            // 内嵌网关：设置里开启即随应用启动（并拉起预解窗口补充票据池）
+            let setup_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
                 let paths = Paths::detect();
                 let cfg = gateway::GatewayConfig::from_settings(&store::load_settings(&paths));
                 if cfg.enabled {
-                    if let Err(e) = gateway::start(cfg).await {
-                        eprintln!("gateway start failed: {e}");
+                    match gateway::start(cfg).await {
+                        Ok(()) => {
+                            let _ = gateway_captcha_warmup_start(setup_handle).await;
+                        }
+                        Err(e) => eprintln!("gateway start failed: {e}"),
                     }
                 }
             });

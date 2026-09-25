@@ -489,7 +489,10 @@ async fn run_attempt(
     // 决不原地等待用户解票（客户端会先超时）；用户解完票后重试请求时，
     // 网关会预挂票据直接通过。
     if entry.plan == "start-plan" && super::captcha::is_challenge(status, &upstream_headers, &body_text) {
-        super::captcha::begin_interactive(); // 前端轮询 gw/status 的 captchaPending 后弹窗
+        // 池空才走到这里：标记 urgent 让预解循环立刻补票（zcode-api urgentCaptchaRefill），
+        // 并置交互待处理标志——预解窗口的 traceless 若需人工会自行显形。
+        super::captcha::mark_urgent();
+        super::captcha::begin_interactive();
         {
             let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
             l.status = 403;

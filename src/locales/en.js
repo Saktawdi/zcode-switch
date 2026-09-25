@@ -246,5 +246,6 @@ export const en = {
   "gw.logsFilter": "Filter by account",
   "gw.logsAllAccounts": "All accounts",
   "gw.captchaRequired": "A gateway request hit a captcha challenge",
-  "gw.captchaRequiredDetail": "Complete the popup verification — the gateway retries with the fresh ticket automatically",
+  "gw.ticketPool": "captcha tickets",
+  "gw.captchaRequiredDetail": "The gateway switched into verification mode: the warmup window pops up on demand; that account cools down and traffic fails over — just retry after verifying",
 };

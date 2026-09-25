@@ -44,6 +44,65 @@ let tracelessTimer = 0;
 // 写入（captcha_get_mode），不依赖 URL——dev 与打包环境行为一致。
 let mode = "claim";
 
+/// 预解循环的单轮调度：池满等久一点，缺票（或 urgent）立即再来一张。
+async function warmupNextRound() {
+  let st = null;
+  try { st = await invoke("gateway_captcha_pool_status"); } catch { }
+  const size = st?.size ?? 0;
+  const min = st?.min ?? 3;
+  const max = st?.max ?? 12;
+  const urgent = !!st?.urgent;
+  const delay = size >= max ? 5000 : (size >= min && !urgent ? 2500 : 150);
+  setTimeout(() => location.reload(), delay);
+}
+
+async function runWarmup() {
+  // 隐藏窗口：静默解票入池。traceless 通过即结束本轮；需要人工时显形。
+  try {
+    mode = "gateway-warmup";
+    const st = await invoke("gateway_captcha_pool_status").catch(() => null);
+    if (st && st.size >= (st.max ?? 12)) {
+      setTimeout(() => location.reload(), 5000);
+      return;
+    }
+    const cfg = await invoke("gateway_captcha_config");
+    if (!cfg?.enabled || !cfg.scene_id) return;
+    region = cfg.region || null;
+    await loadSdk();
+    window.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix };
+    window.initAliyunCaptcha({
+      SceneId: cfg.scene_id,
+      mode: "popup",
+      language: lang() === "en" ? "en" : "zh-CN",
+      showErrorTip: false,
+      element: "#cap-holder",
+      button: "#cap-btn",
+      getInstance: (instance) => {
+        if (typeof instance.startTracelessVerification === "function") {
+          instance.startTracelessVerification();
+          // traceless 迟迟不回来 → 显形请人工，避免静默卡死
+          tracelessTimer = setTimeout(() => {
+            invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+            tracelessTimer = setTimeout(warmupNextRound, 60000);
+          }, 6000);
+        } else {
+          invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+        }
+      },
+      success: (param) => submit(typeof param === "string" ? param : param?.captchaVerifyParam),
+      fail: () => {
+        invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
+        tracelessTimer = setTimeout(warmupNextRound, 60000);
+      },
+      onError: () => {
+        tracelessTimer = setTimeout(warmupNextRound, 8000);
+      },
+    });
+  } catch {
+    setTimeout(() => location.reload(), 8000);
+  }
+}
+
 async function run() {
   try {
     const st = await invoke("get_state");
@@ -57,6 +116,10 @@ async function run() {
   try {
     mode = await invoke("captcha_get_mode").catch(() => "claim");
   } catch { }
+  if (mode === "gateway-warmup") {
+    await runWarmup();
+    return;
+  }
   let cfg;
   try {
     cfg = await invoke(mode === "gateway" ? "gateway_captcha_config" : "claim_captcha_config");
@@ -89,6 +152,14 @@ async function run() {
     if (submitted || !param || !param.trim()) return;
     submitted = true;
     clearTimeout(tracelessTimer);
+    if (mode === "gateway-warmup") {
+      // 预解循环：入池 → 隐藏窗口（若曾因人工验证显形）→ 按池容量决定下一轮
+      invoke("gateway_captcha_submit", { param, region })
+        .then(() => invoke("gateway_captcha_warmup_visibility", { visible: false }).catch(() => {}))
+        .catch(() => {})
+        .finally(() => setTimeout(warmupNextRound, 400));
+      return;
+    }
     status(mode === "gateway" ? t("c.passedGw") : t("c.passed"));
     const cmd = mode === "gateway" ? "gateway_captcha_submit" : "claim_captcha_submit";
     invoke(cmd, { param, region }).catch((e) => {

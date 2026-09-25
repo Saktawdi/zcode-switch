@@ -73,7 +73,8 @@ async function refreshGw() {
 let gwCaptchaPendingLast = false;
 function raiseGwCaptcha() {
   toast(t("gw.captchaRequired"), "warn", t("gw.captchaRequiredDetail"));
-  invoke("gateway_open_captcha").catch(() => {});
+  // 预解窗口负责解票；需人工时让它显形（独立弹窗不再是主路径）
+  invoke("gateway_captcha_warmup_visibility", { visible: true }).catch(() => {});
 }
 
 function copyText(text) {
@@ -858,7 +859,7 @@ function gatewayCardHtml(s) {
     <div class="gw-endpoints">
       <code>OpenAI · ${esc(base)}/v1</code>
       <code>Anthropic · ${esc(base)}/v1/messages</code>
-      <span class="gw-key">${s.gateway_api_key ? esc(t("gw.keySet")) : esc(t("gw.keyNone"))}</span>
+      <span class="gw-key">${gw?.captchaPool ? `${t("gw.ticketPool")} ${gw.captchaPool.size}/${gw.captchaPool.max}` : ""}${s.gateway_api_key ? ` · ${esc(t("gw.keySet"))}` : ` · ${esc(t("gw.keyNone"))}`}</span>
     </div>
     <div class="gw-pool">
       <span class="gw-pool-label">${t("gw.pool")}${total ? ` ${usable}/${total}` : ""}</span>

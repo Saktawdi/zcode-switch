@@ -1,25 +1,31 @@
-//! Start-plan captcha handling — the zcode.z.ai gateway challenges requests
-//! with an Aliyun captcha (response header `x-aliyun-captcha-verify-param` or
-//! in-body `{"code":3007}`); challenged requests must retry with
-//! `x-aliyun-captcha-verify-param` / `-region` headers.
+//! Start-plan captcha — pre-solved ticket pool, ported from zcode-api
+//! `captcha-pool.ts` (TTL 95 s, min/max sizing, background refill, hot-path
+//! take). The zcode.z.ai gateway challenges requests with an Aliyun captcha
+//! (`x-aliyun-captcha-verify-param` header or in-body `{"code":3007}`);
+//! challenged requests retry with that header pair.
 //!
-//! The headless solver from zcode-api (captcha-happy, ~2.5k lines) is not
-//! ported; instead we reuse zcode-switch's proven interactive captcha window
-//! (the claim flow's Aliyun SDK popup): on challenge the gateway asks the UI
-//! for a solve, the user completes it once, and the ticket retries the
-//! request. Tickets are single-use and short-lived.
+//! Architecture difference from zcode-api: their solver is a headless
+//! happy-dom implementation; ours is the Z·SWITCH WebView (the same Aliyun
+//! scene + config endpoint the claim flow uses), driven by a hidden warmup
+//! window that mints tickets in the background. Pool semantics are identical,
+//! so the hot path never waits on a solve and requests normally never meet a
+//! challenge at all.
+//!
+//! Failure semantics stay fail-open: an empty pool means one request meets
+//! the challenge, which is surfaced non-blockingly (the account cools down
+//! and the pool is marked urgent for an immediate refill).
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-static TICKET: Mutex<Option<Ticket>> = Mutex::new(None);
-static NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
-static INTERACTIVE_PENDING: AtomicBool = AtomicBool::new(false);
-
-/// Ticket validity — Aliyun verify params are short-lived; a stale ticket is
-/// discarded rather than burned on a doomed request.
-const TICKET_TTL: Duration = Duration::from_secs(240);
+/// Aliyun verify params are short-lived; zcode-api uses the same 95 s TTL.
+const TICKET_TTL: Duration = Duration::from_secs(95);
+/// Interactive WebView mints are pricier than a headless solve, so the pool
+/// is smaller than zcode-api's 15/60 while keeping the hot path warm.
+pub const POOL_MIN: usize = 3;
+pub const POOL_MAX: usize = 12;
 
 #[derive(Debug, Clone)]
 pub struct Ticket {
@@ -28,52 +34,77 @@ pub struct Ticket {
     pub created_at: Instant,
 }
 
-/// Store a user-solved ticket and wake all waiting requests.
-pub fn store_ticket(verify_param: &str, region: Option<String>) {
-    let t = Ticket {
-        verify_param: verify_param.trim().to_string(),
+impl Ticket {
+    fn fresh(&self) -> bool {
+        self.created_at.elapsed() < TICKET_TTL
+    }
+}
+
+static POOL: Mutex<VecDeque<Ticket>> = Mutex::new(VecDeque::new());
+/// Set when a live request actually hit a challenge — the warmup loop polls
+/// this to top the pool up immediately (zcode-api `urgentCaptchaRefill`).
+static URGENT: AtomicBool = AtomicBool::new(false);
+/// A request is waiting for user interaction on the visible captcha window.
+static INTERACTIVE_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn pool_cell() -> std::sync::MutexGuard<'static, VecDeque<Ticket>> {
+    POOL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn clear_expired(guard: &mut VecDeque<Ticket>) {
+    guard.retain(|t| t.fresh());
+}
+
+/// Mint a ticket into the pool. Returns false when the pool is already full
+/// (the warmup loop uses this as its backpressure signal).
+pub fn push_ticket(verify_param: &str, region: Option<String>) -> bool {
+    let param = verify_param.trim().to_string();
+    if param.is_empty() {
+        return false;
+    }
+    let mut pool = pool_cell();
+    clear_expired(&mut pool);
+    if pool.len() >= POOL_MAX {
+        return false;
+    }
+    pool.push_back(Ticket {
+        verify_param: param,
         region,
         created_at: Instant::now(),
-    };
-    if t.verify_param.is_empty() {
-        return;
-    }
-    *ticket_cell() = Some(t);
-    NOTIFY.notify_waiters();
-    INTERACTIVE_PENDING.store(false, Ordering::SeqCst);
+    });
+    URGENT.store(false, Ordering::SeqCst);
+    true
 }
 
-/// Take a fresh ticket (single-use).
+/// Take a fresh ticket (hot path, single-use).
 pub fn take_ticket() -> Option<Ticket> {
-    let t = ticket_cell().take()?;
-    (t.created_at.elapsed() < TICKET_TTL).then_some(t)
+    let mut pool = pool_cell();
+    clear_expired(&mut pool);
+    pool.pop_front()
 }
 
-/// Peek without consuming (UI status).
-pub fn has_fresh_ticket() -> bool {
-    ticket_cell()
-        .as_ref()
-        .map(|t| t.created_at.elapsed() < TICKET_TTL)
-        .unwrap_or(false)
+/// Pool size after dropping expired tickets (status + warmup backpressure).
+pub fn pool_len() -> usize {
+    let mut pool = pool_cell();
+    clear_expired(&mut pool);
+    pool.len()
 }
 
-/// Wait for a user-solved ticket up to `timeout`.
-pub async fn wait_ticket(timeout: Duration) -> Option<Ticket> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(t) = take_ticket() {
-            return Some(t);
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return None;
-        }
-        let _ = tokio::time::timeout(deadline - now, NOTIFY.notified()).await;
-    }
+/// zcode-api `urgentCaptchaRefill`: a request was challenged — refill now.
+pub fn mark_urgent() {
+    URGENT.store(true, Ordering::SeqCst);
 }
 
-/// Mark an interactive solve as pending; returns true for the single caller
-/// that should raise the popup (event coalescing for concurrent challenges).
+pub fn take_urgent() -> bool {
+    URGENT.swap(false, Ordering::SeqCst)
+}
+
+pub fn urgent() -> bool {
+    URGENT.load(Ordering::SeqCst)
+}
+
+/// Interactive rescue flag: a challenge needs a human (traceless failed).
+/// The UI polls this (via gateway status) and raises the visible window.
 pub fn begin_interactive() -> bool {
     !INTERACTIVE_PENDING.swap(true, Ordering::SeqCst)
 }
@@ -82,20 +113,14 @@ pub fn end_interactive() {
     INTERACTIVE_PENDING.store(false, Ordering::SeqCst);
 }
 
-/// UI 轮询用：是否有人机验证待处理（网关侧不直接发 tauri 事件，
-/// 避免把 GUI 链接依赖拉进非 GUI 上下文）。
 pub fn interactive_pending() -> bool {
     INTERACTIVE_PENDING.load(Ordering::SeqCst)
-}
-
-fn ticket_cell() -> std::sync::MutexGuard<'static, Option<Ticket>> {
-    TICKET.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Detect an upstream captcha challenge:
 ///   1. response header variant — non-empty `x-aliyun-captcha-verify-param`;
 ///   2. in-body variant — HTTP 400 with `{"code":3007}` in the JSON body;
-///   3. defensive — any status whose body literally mentions the upstream's
+///   3. defensive — a body literally mentioning the upstream's
 ///      "captcha verify failed" rejection (observed in the wild).
 pub fn is_challenge(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> bool {
     if let Some(v) = headers.get("x-aliyun-captcha-verify-param") {
@@ -148,16 +173,50 @@ mod tests {
         assert!(!is_challenge(400, &empty, "normal error"));
     }
 
-    #[tokio::test]
-    async fn ticket_store_and_wait() {
-        store_ticket("abc", Some("cn".into()));
-        assert!(has_fresh_ticket());
-        let t = wait_ticket(Duration::from_millis(100)).await.unwrap();
-        assert_eq!(t.verify_param, "abc");
-        assert!(!has_fresh_ticket(), "single-use");
-        // wake-before-wait race: store then immediate wait must return fast
-        store_ticket("def", None);
-        let t = wait_ticket(Duration::from_millis(50)).await.unwrap();
-        assert_eq!(t.verify_param, "def");
+    #[test]
+    fn pool_fifo_capacity_and_single_use() {
+        {
+            let mut p = pool_cell();
+            p.clear();
+        }
+        assert_eq!(pool_len(), 0);
+        assert!(push_ticket("a", Some("cn".into())));
+        assert!(push_ticket("b", None));
+        assert_eq!(pool_len(), 2);
+        let t = take_ticket().unwrap();
+        assert_eq!(t.verify_param, "a", "FIFO order");
+        assert_eq!(pool_len(), 1);
+
+        for i in 0..POOL_MAX {
+            push_ticket(&format!("fill{i}"), None);
+        }
+        assert_eq!(pool_len(), POOL_MAX);
+        assert!(!push_ticket("overflow", None), "full pool rejects");
+
+        while take_ticket().is_some() {}
+        assert!(take_ticket().is_none());
+        assert!(!push_ticket("   ", None));
+    }
+
+    #[test]
+    fn urgent_flag_roundtrip() {
+        assert!(!take_urgent() || true);
+        mark_urgent();
+        assert!(urgent());
+        assert!(take_urgent(), "first take sees it");
+        assert!(!urgent(), "cleared after take");
+        assert!(!take_urgent());
+    }
+
+    #[test]
+    fn interactive_flag_roundtrip() {
+        end_interactive();
+        assert!(begin_interactive(), "first caller raises");
+        assert!(!begin_interactive(), "coalesced");
+        assert!(interactive_pending());
+        end_interactive();
+        assert!(!interactive_pending());
+        assert!(begin_interactive(), "re-raisable after end");
+        end_interactive();
     }
 }

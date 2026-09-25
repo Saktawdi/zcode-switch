@@ -246,5 +246,6 @@ export const zh = {
   "gw.logsFilter": "按账号筛选",
   "gw.logsAllAccounts": "全部账号",
   "gw.captchaRequired": "网关请求触发了人机验证",
-  "gw.captchaRequiredDetail": "请在弹窗中完成验证，网关会自动用新票据重试请求",
+  "gw.ticketPool": "验证票据池",
+  "gw.captchaRequiredDetail": "网关已自动转入验证流程：预解窗口需要时自行弹出；该账号会先冷却并切换，完成验证后重试即可",
 };

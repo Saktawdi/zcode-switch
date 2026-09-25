@@ -223,6 +223,7 @@ pub async fn status_value() -> Value {
         "apiKeySet": config.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false),
         "perAccountConcurrency": config.per_account_concurrency,
         "captchaPending": captcha::interactive_pending(),
+        "captchaPool": { "size": captcha::pool_len(), "min": captcha::POOL_MIN, "max": captcha::POOL_MAX, "urgent": captcha::urgent() },
         "accounts": accounts,
     })
 }
