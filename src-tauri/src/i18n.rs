@@ -215,6 +215,7 @@ const ZH: &[(&str, &str)] = &[
     ("err.gateway.bad_port", "网关端口无效（1-65535）"),
     ("gw.logsTitle", "网关请求日志"),
     ("err.gateway.bad_concurrency", "单号并发上限无效（1-64）"),
+    ("err.gateway.captcha", "该账号触发了人机验证：完成 Z·SWITCH 弹窗验证后重试即可，票据自动生效；也可等待该账号自动切换为 coding-plan 通道（免验证）"),
     ("gateway.tray.label", "Z·GATEWAY"),
 ];
 
@@ -374,6 +375,7 @@ const EN: &[(&str, &str)] = &[
     ("err.gateway.bad_port", "Invalid gateway port (1-65535)"),
     ("gw.logsTitle", "Gateway request log"),
     ("err.gateway.bad_concurrency", "Invalid per-account concurrency (1-64)"),
+    ("err.gateway.captcha", "This account hit a captcha challenge: complete the Z·SWITCH popup verification and retry — the ticket applies automatically; the account will also self-heal onto the captcha-free coding-plan channel"),
     ("gateway.tray.label", "Z·GATEWAY"),
 ];
 

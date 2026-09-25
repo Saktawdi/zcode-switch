@@ -272,7 +272,7 @@ async fn claim_start(
         config: acc.config,
         device_mid: mid,
     });
-    open_captcha_window(&app, auto.unwrap_or(false))?;
+    open_captcha_window(&app, auto.unwrap_or(false), "claim")?;
     Ok(json!({ "account": acc.name, "plan": display }))
 }
 
@@ -793,7 +793,23 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
     });
 }
 
-fn open_captcha_window(app: &AppHandle, auto: bool) -> Result<(), String> {
+static CAPTCHA_MODE: Mutex<&'static str> = Mutex::new("claim");
+
+/// 验证码弹窗启动时查询自己的用途（claim 领取 / gateway 网关请求挑战），
+/// 决定配置与提交命令——两套流程走同一块阿里云场景，但提交目标不同。
+#[tauri::command]
+async fn captcha_get_mode() -> Result<String, String> {
+    Ok(CAPTCHA_MODE.lock().unwrap_or_else(|e| e.into_inner()).to_string())
+}
+
+/// 网关挑战用的验证码配置（与 claim 同一 client/configs 端点，独立命令避免语义耦合）。
+#[tauri::command]
+async fn gateway_captcha_config() -> Result<claim::CaptchaConfig, String> {
+    claim::fetch_captcha_config()
+}
+
+fn open_captcha_window(app: &AppHandle, auto: bool, mode: &'static str) -> Result<(), String> {
+    *CAPTCHA_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
     let (w, h) = (380.0, 320.0);
     if let Some(win) = app.get_webview_window("captcha") {
         let _ = win.eval("location.reload()");
@@ -1241,7 +1257,7 @@ async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<St
 /// 前端收到 gateway://captcha-required 后调用：拉起验证码窗口。
 #[tauri::command]
 async fn gateway_open_captcha(app: AppHandle) -> Result<(), String> {
-    open_captcha_window(&app, false)?;
+    open_captcha_window(&app, false, "gateway")?;
     if let Some(w) = app.get_webview_window("captcha") {
         let _ = w.set_title(&format!("{} · Z·GATEWAY", i18n::tr("title.captcha")));
     }
@@ -1309,6 +1325,8 @@ pub fn run() {
             open_gateway_logs,
             gateway_captcha_submit,
             gateway_open_captcha,
+            gateway_captcha_config,
+            captcha_get_mode,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1321,6 +1339,7 @@ pub fn run() {
                 }
                 if window.label() == "captcha" {
                     *pending_guard() = None;
+                    gateway::captcha::end_interactive();
                 }
             }
         })

@@ -81,6 +81,10 @@ fn build_context(per_account_concurrency: u32) -> handler::GatewayContext {
     let paths = Paths::detect();
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
+        // 两次读之间的空闲上限：上游假死（连接挂着不出字节）时兜底，
+        // 保证请求日志终会落盘而不是永远悬挂。SSE 流式不受影响
+        // （只限"间隔"，不限总时长）。
+        .read_timeout(Duration::from_secs(300))
         .pool_idle_timeout(Duration::from_secs(90))
         .build()
         .expect("reqwest client builds");

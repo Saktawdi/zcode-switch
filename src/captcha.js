@@ -40,8 +40,9 @@ function loadSdk() {
 let submitted = false;
 let region = null;
 let tracelessTimer = 0;
-// 验证码窗口复用：claim 流程 / 网关请求挑战（captcha.html?mode=gateway）
-const mode = new URLSearchParams(location.search).get("mode") || "claim";
+// 验证码窗口复用：claim 领取 / gateway 网关请求挑战。模式由后端在开窗时
+// 写入（captcha_get_mode），不依赖 URL——dev 与打包环境行为一致。
+let mode = "claim";
 
 async function run() {
   try {
@@ -53,9 +54,12 @@ async function run() {
   document.querySelector(".cap-foot").textContent = t("c.foot");
   status(t("c.preparing"));
 
+  try {
+    mode = await invoke("captcha_get_mode").catch(() => "claim");
+  } catch { }
   let cfg;
   try {
-    cfg = await invoke("claim_captcha_config");
+    cfg = await invoke(mode === "gateway" ? "gateway_captcha_config" : "claim_captcha_config");
   } catch (e) {
     notifyStuck();
     status(t("c.cfgFail"), "err");
@@ -88,7 +92,7 @@ async function run() {
     status(mode === "gateway" ? t("c.passedGw") : t("c.passed"));
     const cmd = mode === "gateway" ? "gateway_captcha_submit" : "claim_captcha_submit";
     invoke(cmd, { param, region }).catch((e) => {
-      status(t("c.claimReqFail"), "err");
+      status(mode === "gateway" ? t("c.submitFailGw") : t("c.claimReqFail"), "err");
       detail(stripErr(e));
     });
   };

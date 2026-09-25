@@ -484,42 +484,26 @@ async fn run_attempt(
     let upstream_headers = resp.headers().clone();
     let body_text = resp.text().await.unwrap_or_default();
 
-    // start-plan 人机验证挑战（响应头 / 3007 / 文案）→ 请求 UI 弹窗解票，
-    // 等到票后用同账号重试一次；期间并发许可保持占用。
+    // start-plan 人机验证挑战（响应头 / 3007 / 文案）→ 非阻塞处理：
+    // 标记待验证（前端轮询拉起弹窗）→ 该账号按 403 冷却 → 立刻故障转移。
+    // 决不原地等待用户解票（客户端会先超时）；用户解完票后重试请求时，
+    // 网关会预挂票据直接通过。
     if entry.plan == "start-plan" && super::captcha::is_challenge(status, &upstream_headers, &body_text) {
-        super::captcha::begin_interactive(); // UI 轮询 gw/status 后拉起弹窗
-        let ticket = super::captcha::wait_ticket(std::time::Duration::from_secs(120)).await;
-        super::captcha::end_interactive();
-        let Some(ticket) = ticket else {
-            let msg = "需要人机验证：请在 Z·SWITCH 弹窗中完成验证（等待超时）";
-            ctx.pool.report_failure(&entry.account_id, FailureKind::Forbidden, msg.to_string()).await;
-            return AttemptOutcome::Next(Some((403, "captcha_required".into(), format!("{}: {msg}", entry.name))));
-        };
-        let mut retry_pairs = header_pairs.clone();
-        retry_pairs.extend(super::captcha::ticket_headers(&ticket));
-        match send(retry_pairs).await {
-            Ok(r2) => {
-                let st2 = r2.status().as_u16();
-                if (200..300).contains(&st2) {
-                    return AttemptOutcome::Terminal(
-                        finish_success(ctx, entry, r2, permit, format, model, attempts, log).await,
-                    );
-                }
-                let h2 = r2.headers().clone();
-                let b2 = r2.text().await.unwrap_or_default();
-                if super::captcha::is_challenge(st2, &h2, &b2) {
-                    let msg = "人机验证票据被上游拒绝";
-                    ctx.pool.report_failure(&entry.account_id, FailureKind::Forbidden, msg.to_string()).await;
-                    return AttemptOutcome::Next(Some((403, "captcha_failed".into(), format!("{}: {msg}", entry.name))));
-                }
-                record_status_failure(ctx, entry, st2, &b2).await;
-                return AttemptOutcome::Next(Some(last_error_tuple(entry, st2, &b2)));
-            }
-            Err(e) => {
-                ctx.pool.report_failure(&entry.account_id, FailureKind::Network, format!("connect: {e}")).await;
-                return AttemptOutcome::Next(Some((502, "upstream_unreachable".into(), format!("{}: connect failed: {e}", entry.name))));
-            }
+        super::captcha::begin_interactive(); // 前端轮询 gw/status 的 captchaPending 后弹窗
+        {
+            let mut l = log.lock().unwrap_or_else(|e| e.into_inner());
+            l.status = 403;
+            l.error = Some(crate::i18n::tr("err.gateway.captcha").to_string());
+            super::logs::push(l.clone());
         }
+        ctx.pool
+            .report_failure(&entry.account_id, FailureKind::Forbidden, crate::i18n::tr("err.gateway.captcha").to_string())
+            .await;
+        return AttemptOutcome::Next(Some((
+            403,
+            "captcha_required".into(),
+            format!("{}: {}", entry.name, crate::i18n::tr("err.gateway.captcha")),
+        )));
     }
 
     // Failover decision on error statuses.

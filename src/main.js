@@ -63,15 +63,15 @@ async function refresh() {
 
 async function refreshGw() {
   try { gw = await invoke("gateway_status"); } catch { /* 网关状态缺失不阻塞主界面 */ }
-  // 轮询发现人机验证待处理 → 拉起验证码弹窗（30s 去抖）
-  if (gw?.captchaPending) raiseGwCaptcha();
+  // 仅在「无待验证 → 有待验证」翻转时弹一次窗；用户关窗即清除标记，
+  // 新挑战会再次翻转触发，绝不循环重弹。
+  const pending = !!gw?.captchaPending;
+  if (pending && !gwCaptchaPendingLast) raiseGwCaptcha();
+  gwCaptchaPendingLast = pending;
 }
 
-let gwCaptchaRaisedAt = 0;
+let gwCaptchaPendingLast = false;
 function raiseGwCaptcha() {
-  const now = Date.now();
-  if (now - gwCaptchaRaisedAt < 30_000) return;
-  gwCaptchaRaisedAt = now;
   toast(t("gw.captchaRequired"), "warn", t("gw.captchaRequiredDetail"));
   invoke("gateway_open_captcha").catch(() => {});
 }

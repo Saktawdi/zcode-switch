@@ -194,6 +194,7 @@ export const en = {
   "c.traceless": "Running traceless verification…",
   "c.passed": "Verification passed, claiming…",
   "c.passedGw": "Verification passed — retrying the gateway request…",
+  "c.submitFailGw": "Submit failed (gateway verification)",
   "c.claimReqFail": "Claim request failed",
   "c.interactive": "Manual verification needed — click the button below",
   "c.initFail": "Captcha initialization failed",

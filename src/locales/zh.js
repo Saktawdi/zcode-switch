@@ -194,6 +194,7 @@ export const zh = {
   "c.traceless": "正在无感验证…",
   "c.passed": "验证通过，正在领取…",
   "c.passedGw": "验证通过，正在重试网关请求…",
+  "c.submitFailGw": "提交失败（网关验证）",
   "c.claimReqFail": "领取请求失败",
   "c.interactive": "需要人工验证，请点击下方按钮",
   "c.initFail": "验证码初始化失败",
