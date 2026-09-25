@@ -61,7 +61,11 @@ Base URL: http://127.0.0.1:8317/v1
 
 The main window shows a gateway status card: run state, endpoint URLs (one-click copy) and pool health (per-account success/failure counters and cooldowns).
 
-> Not ported yet: Responses API (`/v1/responses`), off-peak channel `/async/*`, and the start-plan captcha auto-solver (a 403 challenge cools that account down and the pool moves on).
+The request-log window records account, status, latency and retry count per entry, with account filtering and one-click export (CSV / JSONL).
+Captcha-chain telemetry (warmup rounds, rescue, ticket waits) is off by default — it emits a heartbeat every few seconds and would flush the request log.
+Enable **Debug logging** in Settings when diagnosing; the switch takes effect immediately.
+
+> Not ported yet: Responses API (`/v1/responses`), off-peak channel `/async/*`.
 
 ## Security Design
 

@@ -1106,6 +1106,7 @@ input:focus-visible,
 
 /* ———— 网关请求日志页 ———— */
 .gwlog-list { flex: 1; overflow-y: auto; padding: 0 18px 16px; }
+.gwlog-hint { padding: 4px 18px 8px; color: var(--ink-mute); font-size: 12px; }
 .gwlog-empty { color: var(--ink-mute); text-align: center; padding: 40px 0; font-size: 14px; }
 .gwlog-row {
   border: 1px solid var(--hairline-soft);

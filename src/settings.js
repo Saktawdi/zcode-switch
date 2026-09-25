@@ -162,6 +162,21 @@ const actions = {
     });
   },
 
+  // debug 日志开关：立即生效（后端每次读设置，不缓存），无需重启网关。
+  async toggleDebug() {
+    await guard(async () => {
+      await invoke("gateway_set_config", {
+        enabled: null,
+        port: null,
+        apiKey: null,
+        perAccountConcurrency: null,
+        debugLog: !state.gateway_debug_log,
+      });
+      await refresh(); render();
+      toast(t("s.savedToast"));
+    });
+  },
+
   async saveGateway() {
     const portInput = document.querySelector(".settings input.gateway-port");
     const keyInput = document.querySelector(".settings input.gateway-key");
@@ -232,6 +247,7 @@ function render() {
       </div>
       <label style="margin-top:14px">${t("s.gatewayLabel")}</label>
       ${toggle(s.gateway_enabled, "actions.toggleGateway()", t("s.gatewayToggle"), t("s.gatewayToggleDesc"))}
+      ${toggle(!!s.gateway_debug_log, "actions.toggleDebug()", t("s.gatewayDebug"), t("s.gatewayDebugDesc"))}
       <div class="path-line" style="margin-top:6px">
         <input class="zcode-path gateway-port" type="text" inputmode="numeric" style="max-width:90px"
           value="${s.gateway_port || ""}" placeholder="${t("s.gatewayPortPh")}" keydown="onGatewayKey(event)">

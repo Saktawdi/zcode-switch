@@ -410,7 +410,7 @@ async fn run_attempt(
                 }
             }
         }
-        super::logs::push(super::logs::GatewayLogEntry {
+        super::logs::push_debug(super::logs::GatewayLogEntry {
             ts: chrono::Utc::now().timestamp_millis(),
             route: "captcha".into(),
             format: "captcha".into(),

@@ -835,7 +835,7 @@ async fn captcha_watchdog(app: AppHandle) {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
         let rebuilt = gateway_captcha_warmup_start(app.clone()).await.is_ok();
-        gateway::logs::push(gateway::logs::GatewayLogEntry {
+        gateway::logs::push_debug(gateway::logs::GatewayLogEntry {
             ts: chrono::Utc::now().timestamp_millis(),
             route: "captcha".into(),
             format: "captcha".into(),
@@ -854,8 +854,9 @@ async fn captcha_watchdog(app: AppHandle) {
 
 #[tauri::command]
 async fn gateway_captcha_event(stage: String, detail: Option<String>) -> Result<(), String> {
+    // 心跳始终 ping（看门狗判据与日志开关无关），只有落日志受 debug 门控。
     captcha_event_ping();
-    gateway::logs::push(gateway::logs::GatewayLogEntry {
+    gateway::logs::push_debug(gateway::logs::GatewayLogEntry {
         ts: chrono::Utc::now().timestamp_millis(),
         route: "captcha".into(),
         format: "captcha".into(),
@@ -1235,6 +1236,7 @@ async fn gateway_set_config(
     port: Option<u16>,
     api_key: Option<String>,
     per_account_concurrency: Option<u32>,
+    debug_log: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     {
         let _guard = store_guard();
@@ -1258,6 +1260,9 @@ async fn gateway_set_config(
                 return Err(i18n::tr("err.gateway.bad_concurrency"));
             }
             s.gateway_per_account_concurrency = Some(c);
+        }
+        if let Some(d) = debug_log {
+            s.gateway_debug_log = Some(d);
         }
         save_settings(&paths, &s)?;
     }
@@ -1309,6 +1314,47 @@ async fn gateway_logs(limit: Option<u32>) -> Result<Vec<gateway::logs::GatewayLo
 async fn gateway_clear_logs() -> Result<(), String> {
     gateway::logs::clear();
     Ok(())
+}
+
+/// 导出请求日志到用户选定文件。
+///
+/// 内容与日志窗口所见一致（`snapshot` 同样过滤 debug 门控），格式按扩展名：
+/// `.csv` → CSV（表格工具直接开），其余 → JSONL（每行一条，便于脚本处理）。
+/// 导出的是**当前缓冲区**（最近 500 条）；要完整历史用 `open_gateway_logs`
+/// 打开 store 目录里的 gateway.log。
+#[tauri::command]
+async fn gateway_export_logs(app: AppHandle) -> Result<serde_json::Value, String> {
+    let entries = gateway::logs::snapshot(gateway::logs::CAP);
+    if entries.is_empty() {
+        return Err(i18n::tr("err.gateway.export_empty"));
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .add_filter("JSONL", &["jsonl"])
+        .set_file_name(&format!("gateway-logs-{stamp}.csv"))
+        .blocking_save_file();
+    let Some(fp) = picked else {
+        return Ok(json!({ "picked": false }));
+    };
+    let path = fp
+        .into_path()
+        .map_err(|e| i18n::trf("err.path.invalid", &[("e", &e.to_string())]))?;
+    let csv = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("csv"))
+        .unwrap_or(false);
+    let body = if csv {
+        gateway::logs::to_csv(&entries)
+    } else {
+        gateway::logs::to_jsonl(&entries)
+    };
+    store::atomic_write(&path, &body)
+        .map_err(|e| i18n::trf("err.write", &[("e", &e.to_string())]))?;
+    let _ = app.emit("state-changed", ());
+    Ok(json!({ "picked": true, "path": path.to_string_lossy(), "count": entries.len(), "csv": csv }))
 }
 
 /// 打开独立的网关请求日志窗口。
@@ -1535,6 +1581,7 @@ pub fn run() {
             gateway_pool_preview,
             gateway_logs,
             gateway_clear_logs,
+            gateway_export_logs,
             open_gateway_logs,
             gateway_captcha_submit,
             gateway_captcha_config,

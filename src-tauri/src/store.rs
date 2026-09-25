@@ -118,6 +118,10 @@ pub struct Settings {
     /// 单账号最大并发请求数（网关侧信号量），默认 3
     #[serde(default)]
     pub gateway_per_account_concurrency: Option<u32>,
+    /// debug 日志：开启后 captcha 类遥测（预解轮次/救援/票据等待）也进
+    /// 请求日志；默认关。captcha 遥测每 3s 一条心跳，常开会把请求日志刷掉。
+    #[serde(default)]
+    pub gateway_debug_log: Option<bool>,
 }
 
 impl Settings {
@@ -139,6 +143,7 @@ impl Settings {
     pub fn gateway_per_account_concurrency(&self) -> u32 {
         self.gateway_per_account_concurrency.unwrap_or(3).clamp(1, 64)
     }
+    pub fn gateway_debug_log(&self) -> bool { self.gateway_debug_log.unwrap_or(false) }
     pub fn auth_proxy(&self) -> Option<&str> {
         if self.auth_proxy_on.unwrap_or(false) {
             self.auth_proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -185,6 +190,7 @@ pub struct AppState {
     pub gateway_running: bool,
     pub gateway_port: u16,
     pub gateway_api_key: Option<String>,
+    pub gateway_debug_log: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1451,5 +1457,6 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         gateway_running: crate::gateway::is_running(),
         gateway_port: settings.gateway_port(),
         gateway_api_key: settings.gateway_api_key(),
+        gateway_debug_log: settings.gateway_debug_log(),
     })
 }

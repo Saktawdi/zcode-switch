@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { installDelegation, toast } from "./ui.js";
+import { ic } from "./icons.js";
 import { init, t, lang, localeTag, stripErr } from "./i18n.js";
 
 const $app = document.getElementById("app");
 let logs = [];
 let filterAccount = "";
 let autoRefresh = null;
+let debugOn = false;
 
 function fmtTime(ts) {
   const d = new Date(ts);
@@ -23,6 +25,9 @@ function statusClass(s) {
 async function refresh() {
   try {
     logs = await invoke("gateway_logs", { limit: 500 });
+    // debug 开关状态：决定是否提示"验证类遥测需开 debug"
+    const st = await invoke("get_state").catch(() => null);
+    debugOn = !!st?.gateway_debug_log;
   } catch (e) {
     toast(stripErr(e), "err");
   }
@@ -33,6 +38,15 @@ const actions = {
   async clear() {
     await invoke("gateway_clear_logs").catch(() => {});
     await refresh();
+  },
+  async exportLogs() {
+    try {
+      const r = await invoke("gateway_export_logs");
+      if (!r?.picked) { toast(t("gw.logsExportCanceled")); return; }
+      toast(t("gw.logsExportToast", { count: r.count }), "ok", r.path);
+    } catch (e) {
+      toast(stripErr(e), "err");
+    }
   },
   pickAccount(e) {
     filterAccount = e.target.value || "";
@@ -84,8 +98,10 @@ function render() {
         <option value="">${t("gw.logsAllAccounts")}</option>
         ${accountsOptions()}
       </select>
+      <button class="btn-ghost has-ic" click="actions.exportLogs()">${ic("exportAll", 14)} ${t("gw.logsExport")}</button>
       <button class="btn-ghost" click="actions.clear()">${t("gw.logsClear")}</button>
     </header>
+    ${debugOn ? "" : `<div class="gwlog-hint">${t("gw.logsDebugHint")}</div>`}
     <section class="gwlog-list">${rowsHtml()}</section>
   `;
 }
