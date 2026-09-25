@@ -64,6 +64,33 @@ async function wipeSdkState() {
   } catch { }
 }
 
+/// 预解模式专用提交（模块作用域）。claim 路径的 `submit` 定义在 `run()`
+/// 里，预解路径在 run() 早期 return，作用域根本覆盖不到——预解的 success
+/// 回调调它只会抛 ReferenceError，票被静默丢弃、池恒空。预解必须有自己
+/// 的提交函数。
+let warmupSubmitting = false;
+async function submitWarmup(param) {
+  if (warmupSubmitting) return;
+  warmupSubmitting = true;
+  setStage("done");
+  // 质量校验（len<200 是必 3007 的废票，zcode-api 同款防线）
+  if (!param || param.length < 200) {
+    gwlog("degraded-param", `len=${param ? param.length : 0} — refusing, reloading`);
+    wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
+    return;
+  }
+  gwlog("success", `verifyParam len=${param.length}`);
+  try {
+    const r = await invoke("gateway_captcha_submit", { param, region });
+    gwlog("pool-push", `accepted=${!!r?.accepted} size=${r?.size ?? "?"} ${r?.reason || ""}`);
+  } catch (e) {
+    gwlog("pool-push-fail", String(e));
+  } finally {
+    invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
+    warmupNextRound();
+  }
+}
+
 /// 预解循环的单轮调度：池满等久一点，缺票（或 urgent）立即再来一张。
 async function warmupNextRound() {
   let st = null;
@@ -114,6 +141,12 @@ async function runWarmup() {
         $btn.hidden = false;
       } else if (stage === "rescue" && elapsed > 45000) {
         gwlog("rescue-stuck", `${elapsed}ms no pass — reloading`);
+        location.reload();
+      } else if (stage === "done" && elapsed > 12000) {
+        // 安全网：done 态超过 12s 必然意味着提交链路断了（票被丢弃 /
+        // 入池失败 / 下一轮没排上）。宁可重来一轮，也绝不静默卡死——
+        // v1.9~v1.18 池恒空就是这种"解出票但没人接手"的静默停摆。
+        gwlog("done-stuck", `${elapsed}ms in done without progress — reloading`);
         location.reload();
       }
     }, 3000);
@@ -167,11 +200,11 @@ async function runWarmup() {
         }
       },
       success: (result) => {
-        setStage("done");
         clearTimeout(tracelessTimer);
         // result 可能是对象：{success, verifyResult, verifyCode, certifyId, captchaVerifyParam?}
         // verifyResult=false = 风控拒（F008=certifyId 复用等）——清会话重来，绝不静默
         if (result && typeof result === "object" && result.verifyResult === false) {
+          setStage("done");
           gwlog("verify-rejected", `code=${result.verifyCode} certify=${result.certifyId || "-"} — wiping session`);
           wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
           return;
@@ -179,12 +212,13 @@ async function runWarmup() {
         const param = typeof result === "string"
           ? result
           : result?.captchaVerifyParam || result?.verifyParam || result?.data || result?.param;
-        submitted = false;
-        submit(typeof param === "string" ? param : param ? String(param) : "");
-        if (!submitted) {
+        if (!param) {
+          setStage("done");
           gwlog("empty-param", JSON.stringify(result).slice(0, 120));
           wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
+          return;
         }
+        submitWarmup(String(param));
       },
       fail: (p) => {
         // 拖拽失败 / 无痕被拒：SDK 界面可重试，不 reload 打断用户；埋点即可
@@ -260,31 +294,11 @@ async function run() {
 
   status(t("c.traceless"));
 
+  // claim / 网关交互救援路径（预解路径在 run() 早期 return，用 submitWarmup）
   const submit = (param) => {
     if (submitted || !param || !param.trim()) return;
     submitted = true;
     clearTimeout(tracelessTimer);
-    if (mode === "gateway-warmup") {
-      // 预解循环：质量校验（len<200 是必 3007 的废票，zcode-api 同款防线）
-      // → 入池 → 恢复微型预解形态 → 下一轮
-      if (submitted) return;
-      submitted = true;
-      setStage("done");
-      if (!param || param.length < 200) {
-        gwlog("degraded-param", `len=${param ? param.length : 0} — refusing, reloading`);
-        wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
-        return;
-      }
-      gwlog("success", `verifyParam len=${param.length}`);
-      invoke("gateway_captcha_submit", { param, region })
-        .then((r) => gwlog("pool-push", `accepted=${!!r?.accepted} size=${r?.size ?? "?"} ${r?.reason || ""}`))
-        .catch((e) => gwlog("pool-push-fail", String(e)))
-        .finally(() => {
-          invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
-          warmupNextRound();
-        });
-      return;
-    }
     status(mode === "gateway" ? t("c.passedGw") : t("c.passed"));
     const cmd = mode === "gateway" ? "gateway_captcha_submit" : "claim_captcha_submit";
     invoke(cmd, { param, region }).catch((e) => {

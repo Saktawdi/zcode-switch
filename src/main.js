@@ -73,7 +73,9 @@ async function refreshGw() {
 let gwCaptchaPendingLast = false;
 function raiseGwCaptcha() {
   toast(t("gw.captchaRequired"), "warn", t("gw.captchaRequiredDetail"));
-  // 预解循环会自动加速补票并按需自行显形，主窗不打断
+  // 预解循环通常自己显形；这里再显式拉一次救援形态，保证挑战一定有窗可见
+  // （"从没弹出过验证窗"的兜底——窗口存在但页面仍处微型形态时用户看不到）。
+  invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
 }
 
 function copyText(text) {

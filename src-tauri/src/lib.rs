@@ -1349,6 +1349,11 @@ async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<St
         Ok(_size) => (true, None),
         Err(r) => (false, Some(r.as_str().to_string())),
     };
+    if accepted {
+        // 票据已入池 = 触发本次挑战的需求被满足 → 清交互待处理标记，
+        // 否则该标记永不复位，后续挑战再也不会触发前端拉起验证窗。
+        gateway::captcha::end_interactive();
+    }
     close_captcha_window(&app);
     Ok(json!({ "accepted": accepted, "size": gateway::captcha::pool_len(), "reason": reason }))
 }
@@ -1441,8 +1446,18 @@ async fn gateway_captcha_warmup_visibility(app: AppHandle, rescue: bool) -> Resu
     }
     if let Some(w) = app.get_webview_window(WARMUP_LABEL) {
         if rescue {
+            // 页面侧同步切到救援形态：撤掉 warmup-mini（SDK 容器回可见位置）
+            // 并把阶段置为 rescue——否则页面自己的 tick 会按"微型预解"状态
+            // 继续跑，人看到的只是一个空窗（"从没弹出过验证窗"的成因之一）。
+            let _ = w.eval(
+                "document.body.classList.remove('warmup-mini');\
+                 window.__gwStage='rescue'; window.__gwStageAt=Date.now();\
+                 document.getElementById('cap-btn').hidden=false;",
+            );
             let _ = w.set_decorations(true);
             let _ = w.set_size(tauri::LogicalSize::new(380.0, 320.0));
+            let _ = w.set_resizable(false);
+            let _ = w.set_always_on_top(true);
             let _ = w.center();
             let _ = w.show();
             let _ = w.unminimize();
