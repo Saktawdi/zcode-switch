@@ -825,7 +825,7 @@ async fn captcha_watchdog(app: AppHandle) {
             continue;
         }
         let silent_ms = chrono::Utc::now().timestamp_millis() - last_captcha_event();
-        if silent_ms < 45_000 {
+        if silent_ms < 25_000 {
             continue;
         }
         let stale_s = silent_ms / 1000;
@@ -1346,7 +1346,7 @@ async fn open_gateway_logs(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn gateway_captcha_submit(app: AppHandle, param: String, region: Option<String>) -> Result<serde_json::Value, String> {
     let (accepted, reason) = match gateway::captcha::push_ticket(&param, region) {
-        Ok(size) => (true, None),
+        Ok(_size) => (true, None),
         Err(r) => (false, Some(r.as_str().to_string())),
     };
     close_captcha_window(&app);
@@ -1407,6 +1407,9 @@ async fn gateway_captcha_warmup_start(app: AppHandle) -> Result<bool, String> {
     .build()
     .map_err(|e| e.to_string())?;
     park_warmup_window(&win);
+    // 置顶是物理保证：被遮挡 → Chromium occlusion 判 hidden → renderer 冻结
+    // （v1.16 实测禁节流开关在该环境不可靠）。170×46 角落小条置顶可接受。
+    let _ = win.set_always_on_top(true);
     Ok(true)
 }
 
@@ -1450,6 +1453,7 @@ async fn gateway_captcha_warmup_visibility(app: AppHandle, rescue: bool) -> Resu
             let _ = w.set_decorations(false);
             let _ = w.set_resizable(false);
             let _ = w.set_size(tauri::LogicalSize::new(170.0, 46.0));
+            let _ = w.set_always_on_top(true);
             park_warmup_window(&w);
         }
     }

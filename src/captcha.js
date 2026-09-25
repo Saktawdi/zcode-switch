@@ -95,6 +95,15 @@ async function runWarmup() {
     document.title = "Z·GATEWAY · warmup";
     document.body.classList.add("warmup-mini");
     wipeSdkState(); // 每轮全新 SDK 会话——certifyId 复用是 F008 的直接来源
+    // renderer 心跳：tick 断流 = renderer 被冻结（visibilityState 会说明原因）
+    if (window.__gwTick) clearInterval(window.__gwTick);
+    let ticks = 0;
+    window.__gwTick = setInterval(() => {
+      ticks++;
+      if (ticks % 5 === 0) {
+        gwlog("tick", `n=${ticks} visibility=${document.visibilityState}`);
+      }
+    }, 3000);
     await invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
     const st = await invoke("gateway_captcha_pool_status").catch(() => null);
     if (st && st.size >= (st.max ?? 12)) {
