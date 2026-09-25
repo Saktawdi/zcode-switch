@@ -145,13 +145,16 @@ const actions = {
   async toggleGateway() {
     const portInput = document.querySelector(".settings input.gateway-port");
     const keyInput = document.querySelector(".settings input.gateway-key");
+    const concInput = document.querySelector(".settings input.gateway-conc");
     const port = parseInt((portInput?.value || "").trim(), 10);
     const key = (keyInput?.value || "").trim();
+    const conc = parseInt((concInput?.value || "").trim(), 10);
     await guard(async () => {
       const r = await invoke("gateway_set_config", {
         enabled: !state.gateway_enabled,
         port: Number.isFinite(port) && port > 0 ? port : null,
         apiKey: key || null,
+        perAccountConcurrency: Number.isFinite(conc) && conc > 0 ? conc : null,
       });
       await refresh(); render();
       if (r?.running) toast(t("gw.togOnToast"), "ok", t("gw.togOnDetail"));
@@ -162,13 +165,16 @@ const actions = {
   async saveGateway() {
     const portInput = document.querySelector(".settings input.gateway-port");
     const keyInput = document.querySelector(".settings input.gateway-key");
+    const concInput = document.querySelector(".settings input.gateway-conc");
     const port = parseInt((portInput?.value || "").trim(), 10);
     const key = (keyInput?.value || "").trim();
+    const conc = parseInt((concInput?.value || "").trim(), 10);
     await guard(async () => {
       const r = await invoke("gateway_set_config", {
         enabled: null,
         port: Number.isFinite(port) && port > 0 ? port : null,
         apiKey: key || null,
+        perAccountConcurrency: Number.isFinite(conc) && conc > 0 ? conc : null,
       });
       await refresh(); render();
       toast(t("s.gatewaySaved"), "ok", t("s.gatewaySavedDetail"));
@@ -229,11 +235,14 @@ function render() {
       <div class="path-line" style="margin-top:6px">
         <input class="zcode-path gateway-port" type="text" inputmode="numeric" style="max-width:90px"
           value="${s.gateway_port || ""}" placeholder="${t("s.gatewayPortPh")}" keydown="onGatewayKey(event)">
+        <input class="zcode-path gateway-conc" type="text" inputmode="numeric" style="max-width:70px"
+          value="${s.gateway_per_account_concurrency || ""}" placeholder="${t("s.gatewayConcurrencyPh")}"
+          title="${t("s.gatewayConcurrencyTitle")}" keydown="onGatewayKey(event)">
         <input class="zcode-path gateway-key" type="text" style="flex:1"
           value="${esc(s.gateway_api_key || "")}" placeholder="${t("s.gatewayKeyPh")}" keydown="onGatewayKey(event)">
         <button class="btn-ghost" click="actions.saveGateway()">${t("common.save")}</button>
       </div>
-      <div class="hint" style="margin-top:4px">${t("s.gatewayPort")}: ${s.gateway_port || "8317"} · ${t("s.gatewayKey")}: ${s.gateway_api_key ? "•••" : t("s.gatewayKeyPh")}</div>
+      <div class="hint" style="margin-top:4px">${t("s.gatewayConcurrency")}: ${s.gateway_per_account_concurrency || 3} · ${t("s.gatewayPort")}: ${s.gateway_port || "8317"} · ${t("s.gatewayKey")}: ${s.gateway_api_key ? "•••" : t("s.gatewayKeyPh")}</div>
       <label style="margin-top:14px">${t("s.pathLabel")}</label>
       <div class="path-line">
         <input class="zcode-path" type="text" value="${esc(s.zcode_path)}" placeholder="C:\\Program Files\\ZCode\\ZCode.exe" keydown="onPathKey(event)">

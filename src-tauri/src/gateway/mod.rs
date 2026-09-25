@@ -47,6 +47,7 @@ pub struct GatewayConfig {
     pub host: String,
     pub port: u16,
     pub api_key: Option<String>,
+    pub per_account_concurrency: u32,
 }
 
 impl GatewayConfig {
@@ -56,6 +57,7 @@ impl GatewayConfig {
             host: "127.0.0.1".to_string(),
             port: s.gateway_port(),
             api_key: s.gateway_api_key(),
+            per_account_concurrency: s.gateway_per_account_concurrency(),
         }
     }
 }
@@ -72,7 +74,7 @@ fn runtime_cell() -> std::sync::MutexGuard<'static, Option<GatewayRuntime>> {
     GATEWAY_RUNTIME.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn build_context() -> handler::GatewayContext {
+fn build_context(per_account_concurrency: u32) -> handler::GatewayContext {
     let paths = Paths::detect();
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -108,6 +110,7 @@ fn build_context() -> handler::GatewayContext {
         http,
         routing: Some(routing),
         signing: Some(signing),
+        per_account_concurrency,
     }
 }
 
@@ -120,7 +123,7 @@ pub async fn start(config: GatewayConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("端口 {addr} 监听失败：{e}"))?;
 
-    let ctx = Arc::new(build_context());
+    let ctx = Arc::new(build_context(config.per_account_concurrency));
     let state = Arc::new(server::GatewayState {
         ctx: ctx.clone(),
         api_key: config
@@ -191,6 +194,7 @@ pub async fn status_value() -> Value {
             "enabled": cfg.enabled,
             "port": cfg.port,
             "apiKeySet": cfg.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false),
+            "perAccountConcurrency": cfg.per_account_concurrency,
         });
     };
     let accounts = pool.status().await;
@@ -200,6 +204,7 @@ pub async fn status_value() -> Value {
         "host": config.host,
         "port": config.port,
         "apiKeySet": config.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false),
+        "perAccountConcurrency": config.per_account_concurrency,
         "accounts": accounts,
     })
 }
@@ -241,7 +246,7 @@ mod smoke_tests {
         let sandbox = std::env::temp_dir().join(format!("zsw-gw-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(sandbox.join("accounts")).unwrap();
         std::env::set_var("ZCODE_SWITCH_HOME", &sandbox);
-        let ctx = Arc::new(build_context());
+        let ctx = Arc::new(build_context(3));
         let state = Arc::new(server::GatewayState { ctx, api_key: None });
         let router = server::build_router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -306,7 +311,7 @@ mod smoke_tests {
         let sandbox = std::env::temp_dir().join(format!("zsw-gw-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(sandbox.join("accounts")).unwrap();
         std::env::set_var("ZCODE_SWITCH_HOME", &sandbox);
-        let ctx = Arc::new(build_context());
+        let ctx = Arc::new(build_context(3));
         let state = Arc::new(server::GatewayState { ctx, api_key: Some("sk-secret".into()) });
         let router = server::build_router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -351,6 +356,7 @@ mod pipeline_tests {
             jwt: String::new(),
             device_mid: Some("11111111-2222-3333-4444-555555555555".into()),
             messages_url,
+            excluded: false,
             unusable_reason: String::new(),
         }
     }
@@ -370,6 +376,7 @@ mod pipeline_tests {
             http: reqwest::Client::new(),
             routing: None,
             signing: None,
+            per_account_concurrency: 3,
         })
     }
 

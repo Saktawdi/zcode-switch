@@ -112,6 +112,12 @@ pub struct Settings {
     pub gateway_port: Option<u16>,
     #[serde(default)]
     pub gateway_api_key: Option<String>,
+    /// 账号池排除名单：不在池内的账号 id（用户可在账号行动态增删）
+    #[serde(default)]
+    pub gateway_excluded: Option<Vec<String>>,
+    /// 单账号最大并发请求数（网关侧信号量），默认 3
+    #[serde(default)]
+    pub gateway_per_account_concurrency: Option<u32>,
 }
 
 impl Settings {
@@ -123,6 +129,15 @@ impl Settings {
     pub fn gateway_port(&self) -> u16 { self.gateway_port.unwrap_or(crate::gateway::DEFAULT_PORT) }
     pub fn gateway_api_key(&self) -> Option<String> {
         self.gateway_api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    }
+    pub fn gateway_excluded_ids(&self) -> Vec<String> {
+        self.gateway_excluded
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default()
+    }
+    pub fn gateway_per_account_concurrency(&self) -> u32 {
+        self.gateway_per_account_concurrency.unwrap_or(3).clamp(1, 64)
     }
     pub fn auth_proxy(&self) -> Option<&str> {
         if self.auth_proxy_on.unwrap_or(false) {
@@ -143,6 +158,8 @@ pub struct AccountSummary {
     pub has_config: bool,
     pub has_user_info: bool,
     pub identity: zcrypto::Identity,
+    #[serde(default)]
+    pub gateway_excluded: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1409,6 +1426,7 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
             has_config: a.config.is_some(),
             has_user_info: crate::claim::telemetry_user_id(&paths.home, &a.credentials).is_some(),
             identity: zcrypto::account_identity(&a.credentials, &paths.home),
+            gateway_excluded: settings.gateway_excluded_ids().contains(&a.id),
         })
         .collect();
     Ok(AppState {

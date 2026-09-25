@@ -33,6 +33,8 @@ pub struct GatewayContext {
     pub http: reqwest::Client,
     pub routing: Option<EndpointRoutingService>,
     pub signing: Option<SigningManager>,
+    /// 每账号最大并发请求数（信号量许可数，默认 3）。
+    pub per_account_concurrency: u32,
 }
 
 /// Incremental UTF-8 feeder — SSE text can split multibyte characters across
@@ -160,6 +162,8 @@ const MAX_ATTEMPTS: usize = 3;
 enum AttemptOutcome {
     /// A response the client should receive — stop the failover loop.
     Terminal(axum::response::Response),
+    /// Account busy at the per-account concurrency limit — try the next candidate.
+    Busy,
     /// Try the next candidate, optionally updating the last-error snapshot.
     Next(Option<(u16, String, String)>),
 }
@@ -227,20 +231,45 @@ pub async fn handle_completion(
 
     let mut last_error: Option<(u16, String, String)> = None;
     let mut attempts = 0usize;
+    let mut busy_count = 0usize;
+    let mut terminal: Option<axum::response::Response> = None;
 
     for entry in &candidates {
         if attempts >= MAX_ATTEMPTS {
             break;
         }
         attempts += 1;
-        match run_attempt(ctx, entry, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
-            AttemptOutcome::Terminal(resp) => return resp,
+        match run_attempt(ctx, entry, false, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
+            AttemptOutcome::Terminal(resp) => {
+                terminal = Some(resp);
+                break;
+            }
+            AttemptOutcome::Busy => busy_count += 1,
             AttemptOutcome::Next(err) => {
                 if err.is_some() {
                     last_error = err;
                 }
             }
         }
+    }
+
+    // 所有候选账号都到了并发上限：退回等待最优先（轮询起点）账号的空位，
+    // 而不是立刻对客户端报错。
+    if terminal.is_none() && busy_count == attempts {
+        attempts += 1;
+        match run_attempt(ctx, &candidates[0], true, &anthropic_body, &body, inbound_headers, &accept_encoding, &session_id, &env, &app_version, format, &model, attempts).await {
+            AttemptOutcome::Terminal(resp) => terminal = Some(resp),
+            AttemptOutcome::Busy => {}
+            AttemptOutcome::Next(err) => {
+                if err.is_some() {
+                    last_error = err;
+                }
+            }
+        }
+    }
+
+    if let Some(resp) = terminal {
+        return resp;
     }
 
     // 6. Every candidate failed — surface the last upstream error.
@@ -253,6 +282,7 @@ pub async fn handle_completion(
 async fn run_attempt(
     ctx: &GatewayContext,
     entry: &PoolEntry,
+    wait: bool,
     anthropic_body: &Option<Value>,
     raw_body: &Option<String>,
     inbound_headers: &reqwest::header::HeaderMap,
@@ -264,6 +294,18 @@ async fn run_attempt(
     model: &str,
     attempts: usize,
 ) -> AttemptOutcome {
+    // 2.5 每账号并发闸门：拿不到许可就换下一个账号（全忙时 wait=true 阻塞等位）。
+    //     许可随响应持有——流式响应把它移进流里，流结束才释放。
+    let sem = ctx.pool.semaphore_for(&entry.account_id, ctx.per_account_concurrency).await;
+    let permit = if wait {
+        sem.acquire_owned().await.ok()
+    } else {
+        sem.try_acquire_owned().ok()
+    };
+    let Some(permit) = permit else {
+        return AttemptOutcome::Busy;
+    };
+
     // 3. Per-account body transform (metadata.user_id carries the account's
     //    own device mid; start-plan gets the identity blocks).
     let body_str = match anthropic_body {
@@ -347,7 +389,7 @@ async fn run_attempt(
                         let st2 = r2.status().as_u16();
                         if st2 >= 200 && st2 < 300 {
                             return AttemptOutcome::Terminal(
-                                finish_success(ctx, entry, r2, format, model, attempts).await,
+                                finish_success(ctx, entry, r2, permit, format, model, attempts).await,
                             );
                         }
                         let body2 = r2.text().await.unwrap_or_default();
@@ -359,7 +401,7 @@ async fn run_attempt(
                                     let st3 = r3.status().as_u16();
                                     if st3 >= 200 && st3 < 300 {
                                         return AttemptOutcome::Terminal(
-                                            finish_success(ctx, entry, r3, format, model, attempts).await,
+                                            finish_success(ctx, entry, r3, permit, format, model, attempts).await,
                                         );
                                     }
                                     let body3 = r3.text().await.unwrap_or_default();
@@ -387,7 +429,7 @@ async fn run_attempt(
     }
 
     if (200..300).contains(&status) {
-        return AttemptOutcome::Terminal(finish_success(ctx, entry, resp, format, model, attempts).await);
+        return AttemptOutcome::Terminal(finish_success(ctx, entry, resp, permit, format, model, attempts).await);
     }
 
     // Failover decision on error statuses.
@@ -423,6 +465,7 @@ async fn finish_success(
     ctx: &GatewayContext,
     entry: &PoolEntry,
     resp: reqwest::Response,
+    permit: tokio::sync::OwnedSemaphorePermit,
     format: Format,
     model: &str,
     attempts: usize,
@@ -439,12 +482,19 @@ async fn finish_success(
     match format {
         Format::Anthropic => {
             // Passthrough: stream raw bytes, forward the allowlisted headers.
+            // 并发许可跟随流——流结束（或客户端断开）才归还。
             let headers = finalize_headers(reqwest::header::HeaderMap::new(), &upstream_headers, &entry.name, attempts);
             let mut builder = axum::http::Response::builder().status(status);
             for (k, v) in headers.iter() {
                 builder = builder.header(k, v);
             }
-            let stream = resp.bytes_stream();
+            let mut byte_stream = resp.bytes_stream();
+            let stream = async_stream::stream! {
+                let _permit = permit;
+                while let Some(item) = byte_stream.next().await {
+                    yield item;
+                }
+            };
             builder
                 .body(axum::body::Body::from_stream(stream))
                 .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -465,6 +515,7 @@ async fn finish_success(
                     builder = builder.header(k, v);
                 }
                 let stream = async_stream::stream! {
+                    let _permit = permit;
                     while let Some(item) = byte_stream.next().await {
                         match item {
                             Ok(chunk) => {

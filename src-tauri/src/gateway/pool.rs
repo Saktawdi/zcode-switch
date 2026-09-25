@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 use crate::store::{self, Paths};
 use crate::zcrypto;
@@ -65,6 +66,8 @@ pub struct PoolEntry {
     pub device_mid: Option<String>,
     /// Full POST URL for Anthropic messages on this account's upstream.
     pub messages_url: String,
+    /// 用户主动将该账号排除出网关池（账号行动态增删）。
+    pub excluded: bool,
     /// Why this account is not usable (empty when usable).
     pub unusable_reason: String,
 }
@@ -102,6 +105,10 @@ pub struct AccountPool {
     home: PathBuf,
     cache: tokio::sync::RwLock<Option<(Instant, Arc<PoolSnapshot>)>>,
     health: tokio::sync::Mutex<HashMap<String, PoolHealth>>,
+    /// Per-account concurrency limit: one semaphore per account (default 3
+    /// permits). Config changes restart the gateway, rebuilding the pool and
+    /// its semaphores.
+    semaphores: tokio::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
     rr: AtomicUsize,
 }
 
@@ -111,8 +118,17 @@ impl AccountPool {
             home,
             cache: tokio::sync::RwLock::new(None),
             health: tokio::sync::Mutex::new(HashMap::new()),
+            semaphores: tokio::sync::Mutex::new(HashMap::new()),
             rr: AtomicUsize::new(0),
         }
+    }
+
+    /// Get (or lazily create) the concurrency semaphore for one account.
+    pub async fn semaphore_for(&self, account_id: &str, permits: u32) -> Arc<Semaphore> {
+        let mut sems = self.semaphores.lock().await;
+        sems.entry(account_id.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(permits.max(1) as usize)))
+            .clone()
     }
 
     #[cfg(test)]
@@ -127,7 +143,8 @@ impl AccountPool {
     }
 
     /// Load a pool snapshot, refreshing from disk when stale.
-    pub async fn snapshot(&self) -> Arc<PoolSnapshot> {        {
+    pub async fn snapshot(&self) -> Arc<PoolSnapshot> {
+        {
             let cache = self.cache.read().await;
             if let Some((at, snap)) = cache.as_ref() {
                 if snap.entries.len() > 0 && at.elapsed() < POOL_TTL {
@@ -224,6 +241,7 @@ impl AccountPool {
                     provider: e.provider.clone(),
                     plan: e.plan.clone(),
                     usable: e.unusable_reason.is_empty(),
+                    excluded: e.excluded,
                     unusable_reason: e.unusable_reason.clone(),
                     cooling: h.cooldown_until > now,
                     last_error: h.last_error.clone(),
@@ -243,6 +261,7 @@ pub struct PoolStatusEntry {
     pub provider: String,
     pub plan: String,
     pub usable: bool,
+    pub excluded: bool,
     pub unusable_reason: String,
     pub cooling: bool,
     pub last_error: Option<String>,
@@ -307,15 +326,20 @@ fn jwt_is_expired(jwt: &str) -> bool {
     }
 }
 
-/// Build the pool entries from the on-disk account store.
+/// Build the pool entries from the on-disk account store. Accounts listed in
+/// settings' `gateway_excluded` are marked excluded (user-controlled dynamic
+/// pool membership) and never picked as candidates.
 fn build_entries(home: &std::path::Path) -> Vec<PoolEntry> {
     let paths = Paths { home: home.to_path_buf() };
     let Ok(accounts) = store::list_accounts(&paths) else {
         return vec![];
     };
+    let excluded_ids: std::collections::HashSet<String> =
+        store::load_settings(&paths).gateway_excluded_ids().into_iter().collect();
     let secret = zcrypto::default_secret(home);
     let mut out = vec![];
     for acc in accounts {
+        let excluded = excluded_ids.contains(&acc.id);
         let provider = decrypt_field(&acc.credentials, "oauth:active_provider", &secret)
             .unwrap_or_else(|| "bigmodel".to_string());
         let provider = match provider.as_str() {
@@ -375,7 +399,8 @@ fn build_entries(home: &std::path::Path) -> Vec<PoolEntry> {
             jwt: jwt_used,
             device_mid: acc.virtual_device_mid.clone().filter(|m| !m.trim().is_empty()),
             messages_url,
-            unusable_reason,
+            excluded,
+            unusable_reason: if excluded { "已由用户移出网关池".to_string() } else { unusable_reason },
         });
     }
     out
@@ -390,5 +415,62 @@ mod tests {
         assert_eq!(cooldown_for_failure(FailureKind::BadRequest), Duration::ZERO);
         assert!(cooldown_for_failure(FailureKind::Unauthorized) > cooldown_for_failure(FailureKind::RateLimited));
         assert!(cooldown_for_failure(FailureKind::RateLimited) > cooldown_for_failure(FailureKind::ServerError));
+    }
+
+    /// 用户排除的账号被标记 excluded，且不再作为候选。
+    #[tokio::test]
+    async fn excluded_accounts_leave_the_pool() {
+        let sandbox = std::env::temp_dir().join(format!("zsw-pool-ex-{}", uuid::Uuid::new_v4().simple()));
+        let store = sandbox.join(".zcode-switch");
+        std::fs::create_dir_all(store.join("accounts")).unwrap();
+        // payload {"exp":9999999999}（未过期），明文凭据即可
+        let jwt = "h.eyJleHAiOjk5OTk5OTk5OTl9.s";
+        let mk = |id: &str, name: &str| serde_json::json!({
+            "id": id, "name": name, "created_at": "2026-01-01 00:00", "updated_at": "2026-01-01 00:00",
+            "hash": "h",
+            "credentials": { "oauth:active_provider": "zai", "zcodejwttoken": jwt }
+        }).to_string();
+        std::fs::write(store.join("accounts").join("aaa.json"), mk("aaa", "A")).unwrap();
+        std::fs::write(store.join("accounts").join("bbb.json"), mk("bbb", "B")).unwrap();
+        std::fs::write(
+            store.join("settings.json"),
+            serde_json::json!({ "gateway_excluded": ["bbb"] }).to_string(),
+        )
+        .unwrap();
+
+        let pool = AccountPool::new(sandbox.clone());
+        let snap = pool.snapshot().await;
+        assert_eq!(snap.entries.len(), 2);
+        let bbb = snap.entries.iter().find(|e| e.account_id == "bbb").unwrap();
+        let aaa = snap.entries.iter().find(|e| e.account_id == "aaa").unwrap();
+        assert!(bbb.excluded && !bbb.unusable_reason.is_empty());
+        assert!(!aaa.excluded && aaa.unusable_reason.is_empty());
+
+        let cands = pool.pick_candidates(&snap, 5).await;
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].account_id, "aaa");
+    }
+
+    /// 单账号信号量：同账号共享、上限正确；不同账号相互独立。
+    #[tokio::test]
+    async fn per_account_semaphore_limits_concurrency() {
+        let sandbox = std::env::temp_dir().join(format!("zsw-pool-sem-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(sandbox.join("accounts")).unwrap();
+        std::env::set_var("ZCODE_SWITCH_HOME", &sandbox);
+        let pool = AccountPool::new(sandbox);
+
+        let s1 = pool.semaphore_for("acc1", 3).await;
+        let s1b = pool.semaphore_for("acc1", 3).await;
+        let s2 = pool.semaphore_for("acc2", 3).await;
+        assert!(Arc::ptr_eq(&s1, &s1b), "same account shares one semaphore");
+        assert!(!Arc::ptr_eq(&s1, &s2), "different accounts get their own");
+
+        let p1 = s1.try_acquire().unwrap();
+        let p2 = s1.try_acquire().unwrap();
+        let p3 = s1.try_acquire().unwrap();
+        assert!(s1.try_acquire().is_err(), "4th concurrent request on the same account is rejected");
+        assert!(s2.try_acquire().is_ok(), "other accounts are unaffected");
+        drop((p1, p2, p3));
+        assert!(s1.try_acquire().is_ok(), "permits return after release");
     }
 }

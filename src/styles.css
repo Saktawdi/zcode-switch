@@ -1098,3 +1098,8 @@ input:focus-visible,
 .gw-chip-name { color: var(--ink); }
 .gw-chip-meta { color: var(--ink-mute); font-family: var(--mono); font-size: 11px; }
 .gw-chip-stat { color: var(--ink-mute); font-size: 11px; }
+.gw-chip.off .gw-chip-dot { background: var(--ink-mute); }
+.gw-chip.off .gw-chip-name,
+.gw-chip.off .gw-chip-meta { text-decoration: line-through; opacity: .6; }
+.gw-pool-btn { color: var(--mint); }
+.gw-pool-btn.off { color: var(--ink-mute); }

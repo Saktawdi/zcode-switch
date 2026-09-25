@@ -1134,6 +1134,7 @@ async fn gateway_set_config(
     enabled: Option<bool>,
     port: Option<u16>,
     api_key: Option<String>,
+    per_account_concurrency: Option<u32>,
 ) -> Result<serde_json::Value, String> {
     {
         let _guard = store_guard();
@@ -1152,6 +1153,12 @@ async fn gateway_set_config(
             let trimmed = k.trim().to_string();
             s.gateway_api_key = (!trimmed.is_empty()).then_some(trimmed);
         }
+        if let Some(c) = per_account_concurrency {
+            if !(1..=64).contains(&c) {
+                return Err(i18n::tr("err.gateway.bad_concurrency"));
+            }
+            s.gateway_per_account_concurrency = Some(c);
+        }
         save_settings(&paths, &s)?;
     }
     let paths = Paths::detect();
@@ -1160,6 +1167,26 @@ async fn gateway_set_config(
     let status = gateway::status_value().await;
     let _ = app.emit("state-changed", ());
     Ok(status)
+}
+
+/// 账号池动态增删：把单个账号加入 / 移出网关池（写 settings，池 3 秒内自动刷新）。
+#[tauri::command]
+async fn gateway_set_account(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
+    {
+        let _guard = store_guard();
+        let paths = Paths::detect();
+        let mut s = load_settings(&paths);
+        let mut list = s.gateway_excluded.clone().unwrap_or_default();
+        if enabled {
+            list.retain(|x| x != &id);
+        } else if !list.contains(&id) {
+            list.push(id);
+        }
+        s.gateway_excluded = (!list.is_empty()).then_some(list);
+        save_settings(&paths, &s)?;
+    }
+    let _ = app.emit("state-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1216,6 +1243,7 @@ pub fn run() {
             reveal_main,
             gateway_status,
             gateway_set_config,
+            gateway_set_account,
             gateway_pool_preview,
         ])
         .on_window_event(|window, event| {

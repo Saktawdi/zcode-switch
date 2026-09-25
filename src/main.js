@@ -31,6 +31,7 @@ let lastAutoRound = null;
 let autoToggleBusy = false;
 
 const NOTCH_COLORS = ["var(--notch-1)", "var(--notch-2)", "var(--notch-3)", "var(--notch-4)", "var(--notch-5)", "var(--notch-6)"];
+let oneRefreshBusy = {};
 function notchColor(id) {
   let h = 0;
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
@@ -158,7 +159,7 @@ const actions = {
 
   async toggleGateway() {
     await guard(async () => {
-      const r = await invoke("gateway_set_config", { enabled: !state.gateway_enabled, port: null, apiKey: null });
+      const r = await invoke("gateway_set_config", { enabled: !state.gateway_enabled, port: null, apiKey: null, perAccountConcurrency: null });
       await refresh(); refreshGw(); render();
       if (r?.running) toast(t("gw.togOnToast"), "ok", t("gw.togOnDetail"));
       else toast(t("gw.togOffToast"));
@@ -169,6 +170,37 @@ const actions = {
     const base = `http://127.0.0.1:${state.gateway_port || 8317}`;
     copyText(base);
     toast(t("gw.copied"), "ok", base);
+  },
+
+  async toggleGwPool(id) {
+    const a = state?.accounts.find((x) => x.id === id);
+    if (!a) return;
+    await guard(async () => {
+      await invoke("gateway_set_account", { id, enabled: a.gateway_excluded });
+      await refresh(); refreshGw(); render();
+      toast(a.gateway_excluded ? t("gw.poolJoined", { name: a.name }) : t("gw.poolLeft", { name: a.name }), "ok");
+    });
+  },
+
+  async refreshClaimOne(id) {
+    if (claimActive || claimAllRunning || refreshClaim.running) { toast(t("m.claimBusy"), "warn"); return; }
+    if (oneRefreshBusy[id]) return;
+    const name = accountName(id);
+    oneRefreshBusy[id] = true;
+    if (!uiLocked()) render();
+    try {
+      const r = await invoke("claim_refresh", { id });
+      claimable[id] = { plans: r.plans || [], err: null, busy: false };
+      if (r.activationError) toast(t("m.refreshClaimAcctErr", { name, err: stripErr(r.activationError) }), "warn");
+      const n = (r.plans || []).length;
+      toast(t("m.refreshClaimOneDone", { name, n }), n > 0 ? "ok" : undefined);
+    } catch (e) {
+      claimable[id] = { plans: claimable[id]?.plans || [], err: String(e), busy: false };
+      toast(t("m.refreshClaimAcctErr", { name, err: stripErr(e) }), "err");
+    } finally {
+      delete oneRefreshBusy[id];
+      if (!uiLocked()) render();
+    }
   },
 
   async capture() {
@@ -770,14 +802,17 @@ function gwPoolChipsHtml() {
     return `<span class="gw-pool-empty">${t("gw.poolEmpty")}</span>`;
   }
   return accounts.map((a) => {
-    const cls = !a.usable ? " bad" : a.cooling ? " cool" : " ok";
-    const title = !a.usable ? a.unusable_reason || "" : a.last_error || "";
-    const stat = a.usable ? t("gw.requests", { ok: a.ok, total: a.total }) : t("gw.unusable");
+    let cls, stat;
+    if (a.excluded) { cls = " off"; stat = t("gw.excluded"); }
+    else if (!a.usable) { cls = " bad"; stat = t("gw.unusable"); }
+    else if (a.cooling) { cls = " cool"; stat = t("gw.cooling"); }
+    else { cls = " ok"; stat = t("gw.requests", { ok: a.ok, total: a.total }); }
+    const title = a.excluded ? t("gw.excluded") : (!a.usable ? a.unusable_reason || "" : a.last_error || "");
     return `<span class="gw-chip${cls}" title="${esc(title)}">
       <span class="gw-chip-dot"></span>
       <span class="gw-chip-name">${esc(a.name)}</span>
       <span class="gw-chip-meta">${esc(a.provider)}·${esc(a.plan)}</span>
-      <span class="gw-chip-stat">${a.cooling ? esc(t("gw.cooling")) : esc(stat)}</span>
+      <span class="gw-chip-stat">${esc(stat)}</span>
     </span>`;
   }).join("");
 }
@@ -867,6 +902,8 @@ function render() {
         </div>
         <div class="row-actions">
           <button class="icon-btn" title="${t("btn.quota")}" aria-label="${t("btn.quota")}" click="actions.acctQuota('${a.id}')">${ic("gauge", 16)}</button>
+          <button class="icon-btn" title="${t("btn.refreshOne")}" aria-label="${t("btn.refreshOne")}" click="actions.refreshClaimOne('${a.id}')" ${oneRefreshBusy[a.id] ? "disabled" : ""}>${ic("refresh", 16)}</button>
+          <button class="icon-btn gw-pool-btn${a.gateway_excluded ? " off" : ""}" title="${a.gateway_excluded ? t("gw.poolJoinTitle") : t("gw.poolLeaveTitle")}" aria-label="${t("gw.title")}" click="actions.toggleGwPool('${a.id}')">${ic("bolt", 16)}</button>
           <button class="icon-btn" title="${t("btn.rename")}" aria-label="${t("btn.rename")}" click="actions.rename('${a.id}')">${ic("pen", 16)}</button>
           <button class="icon-btn" title="${t("btn.export")}" aria-label="${t("btn.export")}" click="actions.exportOne('${a.id}')">${ic("export", 16)}</button>
           <button class="icon-btn danger" title="${t("btn.delete")}" aria-label="${t("btn.delete")}" click="actions.delete('${a.id}')">${ic("x", 16)}</button>
