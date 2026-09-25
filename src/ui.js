@@ -70,6 +70,13 @@ export function installDelegation() {
     if (!el) return;
     runAttr(el.getAttribute("keydown") || "", e);
   });
+  // change 也要代理：<select>/<input> 的 change 不冒泡成 click，
+  // 只绑 click/keydown 的话 `change="..."` 就是死代码（下拉选了没反应）。
+  document.addEventListener("change", (e) => {
+    const el = e.target.closest("[change]");
+    if (!el) return;
+    runAttr(el.getAttribute("change") || "", e);
+  });
   document.addEventListener("blur", (e) => {
     const el = e.target.closest("[blur]");
     if (!el) return;

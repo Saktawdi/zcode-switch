@@ -39,6 +39,9 @@ jobs:
       - name: i18n keys check
         run: npm run check:i18n
 
+      - name: web regression tests
+        run: npm run test:web
+
       - name: vite build
         run: npm run build
 

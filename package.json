@@ -1,7 +1,7 @@
 {
   "name": "zcode-switch",
   "private": true,
-  "version": "1.20.0",
+  "version": "1.21.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,13 +9,16 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "dist": "node scripts/dist.mjs",
-    "check:i18n": "node scripts/check-i18n-keys.mjs"
+    "check:i18n": "node scripts/check-i18n-keys.mjs",
+    "test:web": "node --test scripts/test-gateway-page.mjs",
+    "test": "npm run check:i18n && npm run test:web"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
+    "happy-dom": "^20.14.5",
     "vite": "^5.4.8"
   },
   "license": "MIT",

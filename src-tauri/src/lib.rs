@@ -1318,13 +1318,17 @@ async fn gateway_clear_logs() -> Result<(), String> {
 
 /// 导出请求日志到用户选定文件。
 ///
-/// 内容与日志窗口所见一致（`snapshot` 同样过滤 debug 门控），格式按扩展名：
-/// `.csv` → CSV（表格工具直接开），其余 → JSONL（每行一条，便于脚本处理）。
-/// 导出的是**当前缓冲区**（最近 500 条）；要完整历史用 `open_gateway_logs`
-/// 打开 store 目录里的 gateway.log。
+/// 内容与日志窗口所见一致（`snapshot` 同样过滤 debug 门控；`account` 传入时
+/// 只导出该账号，对齐界面上的筛选），格式按扩展名：`.csv` → CSV（表格工具
+/// 直接开），其余 → JSONL（每行一条，便于脚本处理）。导出的是**当前缓冲区**
+/// （最近 500 条）；要完整历史用 `open_gateway_logs` 打开 store 目录里的
+/// gateway.log。
 #[tauri::command]
-async fn gateway_export_logs(app: AppHandle) -> Result<serde_json::Value, String> {
-    let entries = gateway::logs::snapshot(gateway::logs::CAP);
+async fn gateway_export_logs(app: AppHandle, account: Option<String>) -> Result<serde_json::Value, String> {
+    let mut entries = gateway::logs::snapshot(gateway::logs::CAP);
+    if let Some(name) = account.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        entries.retain(|e| e.account.as_deref() == Some(name));
+    }
     if entries.is_empty() {
         return Err(i18n::tr("err.gateway.export_empty"));
     }
