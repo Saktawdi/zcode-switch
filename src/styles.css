@@ -1036,3 +1036,65 @@ input:focus-visible,
 .pv-item:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 .pv-item .pv-arrow { color: var(--ink-mute); font-family: var(--mono); }
 .pv-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+
+/* ———— Z·GATEWAY（融合 zcode-api/ZCode Proxy）———— */
+.gw-card {
+  margin: 0 18px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 10px 14px 11px;
+  opacity: .82;
+  transition: opacity .15s ease, border-color .15s ease;
+}
+.gw-card.live {
+  opacity: 1;
+  border-color: rgba(98, 195, 112, .35);
+  box-shadow: 0 0 0 1px rgba(98, 195, 112, .06);
+}
+.gw-head { display: flex; align-items: center; gap: 9px; }
+.gw-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--ink-mute);
+  flex: none;
+}
+.gw-dot.on { background: var(--mint); box-shadow: 0 0 6px rgba(98, 195, 112, .7); }
+.gw-name { font-weight: 700; letter-spacing: .04em; font-size: 14.5px; }
+.gw-status { color: var(--ink-dim); font-size: 13.5px; }
+.gw-spacer { flex: 1; }
+.gw-endpoints {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 7px;
+}
+.gw-endpoints code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-dim);
+  background: var(--bg);
+  border: 1px solid var(--hairline-soft);
+  border-radius: 5px;
+  padding: 2px 8px;
+  user-select: text;
+}
+.gw-key { color: var(--ink-mute); font-size: 12.5px; margin-left: auto; }
+.gw-pool {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 8px;
+}
+.gw-pool-label { color: var(--ink-mute); font-size: 12.5px; flex: none; }
+.gw-pool-empty { color: var(--ink-mute); font-size: 12.5px; }
+.gw-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 999px;
+  padding: 2px 10px 2px 8px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  background: var(--bg);
+}
+.gw-chip-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--mint); }
+.gw-chip.cool .gw-chip-dot { background: var(--amber); }
+.gw-chip.bad .gw-chip-dot { background: var(--red); }
+.gw-chip-name { color: var(--ink); }
+.gw-chip-meta { color: var(--ink-mute); font-family: var(--mono); font-size: 11px; }
+.gw-chip-stat { color: var(--ink-mute); font-size: 11px; }

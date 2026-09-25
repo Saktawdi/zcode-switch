@@ -6,6 +6,7 @@ import { init, t, has, lang, localeTag, stripErr } from "./i18n.js";
 
 const $app = document.getElementById("app");
 let state = null;
+let gw = null;
 let renaming = null;
 let busy = false;
 let appVer = "";
@@ -57,6 +58,21 @@ function idLabel(id) {
 async function refresh() {
   state = await invoke("get_state");
   if (state?.language) init(state.language);
+}
+
+async function refreshGw() {
+  try { gw = await invoke("gateway_status"); } catch { /* 网关状态缺失不阻塞主界面 */ }
+}
+
+function copyText(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch { /* 忽略复制失败 */ }
+  ta.remove();
 }
 
 function uiLocked() {
@@ -139,6 +155,21 @@ function autoPillTitle(s) {
 
 const actions = {
   async refresh() { await refresh(); render(); },
+
+  async toggleGateway() {
+    await guard(async () => {
+      const r = await invoke("gateway_set_config", { enabled: !state.gateway_enabled, port: null, apiKey: null });
+      await refresh(); refreshGw(); render();
+      if (r?.running) toast(t("gw.togOnToast"), "ok", t("gw.togOnDetail"));
+      else toast(t("gw.togOffToast"));
+    });
+  },
+
+  copyGwBase() {
+    const base = `http://127.0.0.1:${state.gateway_port || 8317}`;
+    copyText(base);
+    toast(t("gw.copied"), "ok", base);
+  },
 
   async capture() {
     await guard(async () => {
@@ -733,6 +764,57 @@ function restoreScroll(cap) {
   }
 }
 
+function gwPoolChipsHtml() {
+  const accounts = gw?.accounts;
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    return `<span class="gw-pool-empty">${t("gw.poolEmpty")}</span>`;
+  }
+  return accounts.map((a) => {
+    const cls = !a.usable ? " bad" : a.cooling ? " cool" : " ok";
+    const title = !a.usable ? a.unusable_reason || "" : a.last_error || "";
+    const stat = a.usable ? t("gw.requests", { ok: a.ok, total: a.total }) : t("gw.unusable");
+    return `<span class="gw-chip${cls}" title="${esc(title)}">
+      <span class="gw-chip-dot"></span>
+      <span class="gw-chip-name">${esc(a.name)}</span>
+      <span class="gw-chip-meta">${esc(a.provider)}·${esc(a.plan)}</span>
+      <span class="gw-chip-stat">${a.cooling ? esc(t("gw.cooling")) : esc(stat)}</span>
+    </span>`;
+  }).join("");
+}
+
+function gatewayCardHtml(s) {
+  const running = s.gateway_running;
+  const port = s.gateway_port || 8317;
+  const base = `http://127.0.0.1:${port}`;
+  const usable = (gw?.accounts || []).filter((a) => a.usable).length;
+  const total = (gw?.accounts || []).length;
+  return `
+  <section class="gw-card${running ? " live" : ""}" aria-label="${t("gw.title")}">
+    <div class="gw-head">
+      <span class="gw-dot${running ? " on" : ""}"></span>
+      <span class="gw-name">${t("gw.title")}</span>
+      <span class="gw-status">${running ? esc(t("gw.on")) : esc(t("gw.off"))}${running ? ` · ${esc(t("gw.listenPort"))} ${port}` : ""}</span>
+      <span class="gw-spacer"></span>
+      <button class="icon-btn" title="${t("gw.copyBase")}" aria-label="${t("gw.copyBase")}" click="actions.copyGwBase()">${ic("export", 15)}</button>
+      <button class="tog-inline${s.gateway_enabled ? " on" : ""}" role="switch" aria-checked="${s.gateway_enabled}"
+        aria-label="${t("gw.title")}" title="${running ? esc(t("gw.togOffToast")) : esc(t("gw.togOnToast"))}"
+        click="actions.toggleGateway()">
+        <span class="toggle${s.gateway_enabled ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
+      </button>
+    </div>
+    ${running ? `
+    <div class="gw-endpoints">
+      <code>OpenAI · ${esc(base)}/v1</code>
+      <code>Anthropic · ${esc(base)}/v1/messages</code>
+      <span class="gw-key">${s.gateway_api_key ? esc(t("gw.keySet")) : esc(t("gw.keyNone"))}</span>
+    </div>
+    <div class="gw-pool">
+      <span class="gw-pool-label">${t("gw.pool")}${total ? ` ${usable}/${total}` : ""}</span>
+      ${gwPoolChipsHtml()}
+    </div>` : ""}
+  </section>`;
+}
+
 function render() {
   const scrollCap = captureScroll();
   if (!state) {
@@ -856,6 +938,8 @@ function render() {
       <span class="count">${t("m.count", { count: s.accounts.length })}</span>
     </div>
 
+    ${gatewayCardHtml(s)}
+
     <main class="list">${listHtml}</main>
   `;
   restoreScroll(scrollCap);
@@ -971,6 +1055,7 @@ async function sweepTick() {
   try {
     appVer = await invoke("app_version").catch(() => "");
     await refresh();
+    refreshGw();
     render();
     await invoke("reveal_main");
     setTimeout(dismissSplash, 350);
@@ -978,6 +1063,7 @@ async function sweepTick() {
     sweepTick();
     setInterval(() => {
       invoke("get_state").then((s) => { state = s; if (s?.language) init(s.language); enrollAccounts(); if (!uiLocked()) render(); }).catch(() => {});
+      if (state?.gateway_running) refreshGw().then(() => { if (!uiLocked()) render(); });
     }, 5000);
     setInterval(sweepTick, TICK_MS);
     setTimeout(autoClaimTick, AUTO_CLAIM_FIRST_DELAY_MS);

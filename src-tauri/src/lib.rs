@@ -1,5 +1,6 @@
 pub mod cipher;
 pub mod cli;
+pub mod gateway;
 pub mod i18n;
 mod claim;
 mod flowlog;
@@ -1122,6 +1123,50 @@ async fn open_external(url: String) -> Result<(), String> {
     store::open_url(&url)
 }
 
+#[tauri::command]
+async fn gateway_status() -> Result<serde_json::Value, String> {
+    Ok(gateway::status_value().await)
+}
+
+#[tauri::command]
+async fn gateway_set_config(
+    app: AppHandle,
+    enabled: Option<bool>,
+    port: Option<u16>,
+    api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    {
+        let _guard = store_guard();
+        let paths = Paths::detect();
+        let mut s = load_settings(&paths);
+        if let Some(v) = enabled {
+            s.gateway_enabled = Some(v);
+        }
+        if let Some(p) = port {
+            if p == 0 {
+                return Err(i18n::tr("err.gateway.bad_port"));
+            }
+            s.gateway_port = Some(p);
+        }
+        if let Some(k) = api_key {
+            let trimmed = k.trim().to_string();
+            s.gateway_api_key = (!trimmed.is_empty()).then_some(trimmed);
+        }
+        save_settings(&paths, &s)?;
+    }
+    let paths = Paths::detect();
+    let cfg = gateway::GatewayConfig::from_settings(&load_settings(&paths));
+    gateway::apply(cfg).await?;
+    let status = gateway::status_value().await;
+    let _ = app.emit("state-changed", ());
+    Ok(status)
+}
+
+#[tauri::command]
+async fn gateway_pool_preview() -> Result<serde_json::Value, String> {
+    Ok(gateway::pool_status_value().await)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1169,6 +1214,9 @@ pub fn run() {
             open_external,
             open_settings,
             reveal_main,
+            gateway_status,
+            gateway_set_config,
+            gateway_pool_preview,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1189,6 +1237,16 @@ pub fn run() {
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }
+            // 内嵌网关：设置里开启即随应用启动
+            tauri::async_runtime::spawn(async {
+                let paths = Paths::detect();
+                let cfg = gateway::GatewayConfig::from_settings(&store::load_settings(&paths));
+                if cfg.enabled {
+                    if let Err(e) = gateway::start(cfg).await {
+                        eprintln!("gateway start failed: {e}");
+                    }
+                }
+            });
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().expect("no window icon").clone())
                 .tooltip("Z·SWITCH")

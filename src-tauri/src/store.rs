@@ -106,6 +106,12 @@ pub struct Settings {
     pub language: Option<String>,
     #[serde(default)]
     pub auto_claim: Option<bool>,
+    #[serde(default)]
+    pub gateway_enabled: Option<bool>,
+    #[serde(default)]
+    pub gateway_port: Option<u16>,
+    #[serde(default)]
+    pub gateway_api_key: Option<String>,
 }
 
 impl Settings {
@@ -113,6 +119,11 @@ impl Settings {
     pub fn close_to_tray(&self) -> bool { self.close_to_tray.unwrap_or(true) }
     pub fn hot_switch(&self) -> bool { self.hot_switch.unwrap_or(false) }
     pub fn auto_claim(&self) -> bool { self.auto_claim.unwrap_or(false) }
+    pub fn gateway_enabled(&self) -> bool { self.gateway_enabled.unwrap_or(false) }
+    pub fn gateway_port(&self) -> u16 { self.gateway_port.unwrap_or(crate::gateway::DEFAULT_PORT) }
+    pub fn gateway_api_key(&self) -> Option<String> {
+        self.gateway_api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    }
     pub fn auth_proxy(&self) -> Option<&str> {
         if self.auth_proxy_on.unwrap_or(false) {
             self.auth_proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -153,6 +164,10 @@ pub struct AppState {
     pub auth_proxy_on: bool,
     pub auth_proxy_url: Option<String>,
     pub language: String,
+    pub gateway_enabled: bool,
+    pub gateway_running: bool,
+    pub gateway_port: u16,
+    pub gateway_api_key: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1414,5 +1429,9 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         auth_proxy_on: settings.auth_proxy_on.unwrap_or(false),
         auth_proxy_url: settings.auth_proxy_url.clone(),
         language: crate::i18n::current().as_str().to_string(),
+        gateway_enabled: settings.gateway_enabled(),
+        gateway_running: crate::gateway::is_running(),
+        gateway_port: settings.gateway_port(),
+        gateway_api_key: settings.gateway_api_key(),
     })
 }

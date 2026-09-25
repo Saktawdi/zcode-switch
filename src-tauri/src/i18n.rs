@@ -212,6 +212,8 @@ const ZH: &[(&str, &str)] = &[
     ("cli.read_fail", "读取失败：{e}"),
     ("cli.json_fail", "JSON 解析失败：{e}"),
     ("err.lang.unknown", "未知语言：{lang}（支持 zh / en）"),
+    ("err.gateway.bad_port", "网关端口无效（1-65535）"),
+    ("gateway.tray.label", "Z·GATEWAY"),
 ];
 
 const EN: &[(&str, &str)] = &[
@@ -367,6 +369,8 @@ const EN: &[(&str, &str)] = &[
     ("cli.read_fail", "Read failed: {e}"),
     ("cli.json_fail", "JSON parse failed: {e}"),
     ("err.lang.unknown", "Unknown language: {lang} (supported: zh / en)"),
+    ("err.gateway.bad_port", "Invalid gateway port (1-65535)"),
+    ("gateway.tray.label", "Z·GATEWAY"),
 ];
 
 fn table_for(lang: Lang) -> &'static [(&'static str, &'static str)] {
