@@ -1146,6 +1146,17 @@ body.warmup-mini #cap-app { padding: 6px 10px; display: flex; align-items: cente
 body.warmup-mini .cap-status { margin: 0; }
 body.warmup-mini #cap-text { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 body.warmup-mini #cap-detail,
-body.warmup-mini #cap-holder,
-body.warmup-mini #cap-btn,
 body.warmup-mini .cap-foot { display: none !important; }
+/* #cap-holder/#cap-btn 是阿里云 SDK 的容器与触发元素：display:none 会让
+   SDK 卡在 preparing 永不回调（v1.17 实测）。改为移出视口但保留布局，
+   SDK 拿到的尺寸正常、无痕验证可跑，视觉上仍是微型条。 */
+body.warmup-mini #cap-holder,
+body.warmup-mini #cap-btn {
+  position: fixed !important;
+  left: -9999px !important;
+  top: 0 !important;
+  width: 380px !important;
+  height: 320px !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}

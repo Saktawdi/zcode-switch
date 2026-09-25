@@ -77,16 +77,12 @@ async function warmupNextRound() {
   setTimeout(() => location.reload(), delay);
 }
 
-/// 人工救援守卫：显形后 success 迟迟不来（SDK 回源卡住）→ 强制重来，
-/// 否则窗口永远停在「验证通过！」而池里没有票。
-function armRescueGuard(ms) {
-  clearTimeout(window.__gwRescueGuard);
-  window.__gwRescueGuard = setTimeout(() => {
-    gwlog("success-stuck", `no success callback ${ms}ms after pass — reloading`);
-    location.reload();
-  }, ms);
+/// 求解阶段状态机（verifying/rescue/done）——兜底全部走同一个可靠
+/// interval 轮询（tick 实测可靠；一次性 setTimeout 有不触发的案例）。
+function setStage(stage) {
+  window.__gwStage = stage;
+  window.__gwStageAt = Date.now();
 }
-function disarmRescueGuard() { clearTimeout(window.__gwRescueGuard); }
 
 async function runWarmup() {
   // 隐藏问题不存在——本窗常驻可见（微型）。先归位微型形态（幂等）。
@@ -94,14 +90,31 @@ async function runWarmup() {
     mode = "gateway-warmup";
     document.title = "Z·GATEWAY · warmup";
     document.body.classList.add("warmup-mini");
+    status(t("c.traceless"));
     wipeSdkState(); // 每轮全新 SDK 会话——certifyId 复用是 F008 的直接来源
-    // renderer 心跳：tick 断流 = renderer 被冻结（visibilityState 会说明原因）
+    // renderer 心跳 + 阶段轮询（同一 interval，实测可靠）：
+    //   verifying 超 9s → 显形救援（traceless-stuck）
+    //   rescue 超 45s 无人通过 → 重来（rescue-stuck）
     if (window.__gwTick) clearInterval(window.__gwTick);
     let ticks = 0;
+    setStage("init");
     window.__gwTick = setInterval(() => {
       ticks++;
+      const stage = window.__gwStage || "init";
+      const elapsed = Date.now() - (window.__gwStageAt || Date.now());
       if (ticks % 5 === 0) {
-        gwlog("tick", `n=${ticks} visibility=${document.visibilityState}`);
+        gwlog("tick", `n=${ticks} stage=${stage} visibility=${document.visibilityState}`);
+      }
+      if (stage === "verifying" && elapsed > 9000) {
+        setStage("rescue");
+        gwlog("traceless-stuck", `${elapsed}ms no result — rescue window`);
+        document.body.classList.remove("warmup-mini");
+        invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
+        status(t("c.interactive"));
+        $btn.hidden = false;
+      } else if (stage === "rescue" && elapsed > 45000) {
+        gwlog("rescue-stuck", `${elapsed}ms no pass — reloading`);
+        location.reload();
       }
     }, 3000);
     await invoke("gateway_captcha_warmup_visibility", { rescue: false }).catch(() => {});
@@ -142,27 +155,19 @@ async function runWarmup() {
       getInstance: (instance) => {
         if (typeof instance.startTracelessVerification === "function") {
           instance.startTracelessVerification();
+          setStage("verifying");
           gwlog("traceless-start");
-          // traceless 迟迟不回来 → 放大窗口请人工；守卫兜底防卡死
-          tracelessTimer = setTimeout(() => {
-            gwlog("traceless-stuck", "6s no result — rescue window");
-            document.body.classList.remove("warmup-mini");
-            invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
-            status(t("c.interactive"));
-            $btn.hidden = false;
-            armRescueGuard(30000);
-          }, 6000);
         } else {
           gwlog("traceless-unavailable", "SDK has no startTracelessVerification");
+          setStage("rescue");
           document.body.classList.remove("warmup-mini");
           invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
           status(t("c.interactive"));
           $btn.hidden = false;
-          armRescueGuard(45000);
         }
       },
       success: (result) => {
-        disarmRescueGuard();
+        setStage("done");
         clearTimeout(tracelessTimer);
         // result 可能是对象：{success, verifyResult, verifyCode, certifyId, captchaVerifyParam?}
         // verifyResult=false = 风控拒（F008=certifyId 复用等）——清会话重来，绝不静默
@@ -182,19 +187,25 @@ async function runWarmup() {
         }
       },
       fail: (p) => {
-        // 拖拽失败 / 无痕被拒：SDK 界面可重试，不 reload 打断用户；埋点+延长守卫
+        // 拖拽失败 / 无痕被拒：SDK 界面可重试，不 reload 打断用户；埋点即可
         const raw = typeof p === "string" ? p : JSON.stringify(p || {});
         if (p && typeof p === "object" && p.verifyResult === false) {
+          setStage("done");
           gwlog("verify-rejected-fail", `code=${p.verifyCode} certify=${p.certifyId || "-"}`);
           wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
           return;
         }
+        setStage("rescue");
         gwlog("sdk-fail", raw.slice(0, 120));
-        armRescueGuard(60000);
+        document.body.classList.remove("warmup-mini");
+        invoke("gateway_captcha_warmup_visibility", { rescue: true }).catch(() => {});
+        status(t("c.interactive"));
+        $btn.hidden = false;
       },
       onError: (p) => {
+        setStage("done");
         gwlog("sdk-error", typeof p === "string" ? p.slice(0, 120) : JSON.stringify(p).slice(0, 120));
-        tracelessTimer = setTimeout(() => location.reload(), 8000);
+        setTimeout(() => location.reload(), 8000);
       },
     });
   } catch (e) {
@@ -258,7 +269,7 @@ async function run() {
       // → 入池 → 恢复微型预解形态 → 下一轮
       if (submitted) return;
       submitted = true;
-      disarmRescueGuard();
+      setStage("done");
       if (!param || param.length < 200) {
         gwlog("degraded-param", `len=${param ? param.length : 0} — refusing, reloading`);
         wipeSdkState().finally(() => setTimeout(() => location.reload(), 300));
